@@ -1,0 +1,70 @@
+# ===========================
+# Terraform
+# ===========================
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Terraform variable files (may contain secrets)
+*.tfvars
+*.tfvars.json
+!example.tfvars
+!example.tfvars.json
+
+# ===========================
+# Cloud Credentials & Secrets
+# ===========================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials
+credentials.json
+~/.aws/
+kubeconfig
+kubeconfig.*
+!kubeconfig.example
+
+# ===========================
+# Ansible
+# ===========================
+*.retry
+inventory/hosts
+inventory/production
+inventory/staging
+vault_password_file
+.vault_pass
+*.vault
+
+# ===========================
+# Kubernetes
+# ===========================
+# Secret manifests (never commit actual secrets)
+*-secret.yaml
+*-secret.yml
+secrets/
+!secrets/example/
+
+# ===========================
+# OS & Editor
+# ===========================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
