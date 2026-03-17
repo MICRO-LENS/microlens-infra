@@ -1,0 +1,76 @@
+# ============================================================
+# 파일: 04-ingress.yaml
+# 목적: 외부 트래픽을 경로(Path) 기준으로 각 서비스에 라우팅
+# 리소스: Ingress
+#
+# 전제 조건: 05-addons.yml에서 Nginx Ingress Controller가 설치되어 있어야 한다.
+#
+# 트래픽 흐름:
+#   Android 앱 → NAT 공인 IP:NodePort
+#     → Nginx Ingress Controller Pod
+#       → /stain/detect   → stain-detection-svc  → stain-detection Pod
+#       → /stain/classify → stain-classification-svc → stain-classification Pod
+#       → /teeth/check    → teeth-svc             → teeth Pod
+#
+# rewrite-target 동작 원리:
+#   경로 정규식에서 두 번째 캡처 그룹 (.*)이 $2에 해당한다.
+#   예) 클라이언트가 /stain/detect/predict 로 요청하면
+#       Pod는 /predict 로 받는다. (prefix 제거)
+#   이렇게 하면 각 서비스의 API 코드가 /stain/detect 같은
+#   인프라 경로 구조를 알 필요가 없어 서비스 독립성이 보장된다.
+#
+# host 값 주입 방식:
+#   Ansible 06-deploy-k8s.yml이 template 모듈로 이 파일을 렌더링할 때
+#   nat_ip = hostvars['bastion']['ansible_host'] (hosts.ini의 NAT 퍼블릭 IP)를 자동 주입
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: microlens-ingress
+  namespace: microlens
+  annotations:
+    # rewrite-target: 경로 prefix를 제거하고 Pod에 전달
+    # 예) /stain/detect/predict → /predict
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    # AI 추론은 응답 시간이 길 수 있으므로 타임아웃을 300초로 설정
+    # 기본값(60초)으로 두면 추론 중 타임아웃 오류가 발생할 수 있다
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # 이미지 파일 업로드를 고려해 요청 body 크기 제한을 50MB로 완화
+    # 기본값은 1MB로, 이미지 업로드 시 413 오류가 발생한다
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  # Nginx Ingress Controller가 이 Ingress를 처리하도록 지정
+  # 05-addons.yml에서 설치한 컨트롤러의 ingressClassName과 일치해야 한다
+  ingressClassName: nginx
+  rules:
+    # nat_ip: Ansible 06-deploy-k8s.yml이 hostvars['bastion']['ansible_host']로 자동 주입
+    # 도메인이 없으므로 NAT 인스턴스 퍼블릭 IP를 host로 사용
+    - host: {{ nat_ip }}
+      http:
+        paths:
+          # 얼룩 탐지 API
+          # 정규식 (/|$)(.*): /stain/detect 다음의 경로를 $2로 캡처
+          - path: /stain/detect(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: stain-detection-svc
+                port:
+                  number: 80
+          # 얼룩 분류 API
+          - path: /stain/classify(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: stain-classification-svc
+                port:
+                  number: 80
+          # 치아 분석 API
+          - path: /teeth/check(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: teeth-svc
+                port:
+                  number: 80

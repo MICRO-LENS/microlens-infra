@@ -1,0 +1,38 @@
+---
+# 전체 클러스터 프로비저닝 마스터 플레이북
+# 실행: ansible-playbook site.yml
+#
+# 단계별 실행:
+#   ansible-playbook site.yml --tags common
+#   ansible-playbook site.yml --tags gpu         # gpu_enabled: true 일 때만 유효
+#   ansible-playbook site.yml --tags master
+#   ansible-playbook site.yml --tags worker
+#   ansible-playbook site.yml --tags addons
+#   ansible-playbook site.yml --tags k8s-deploy  # K8s 매니페스트 렌더링 및 배포
+#
+# K8s 매니페스트만 재배포:
+#   ansible-playbook site.yml --tags k8s-deploy
+#   → aws_account_id를 동적으로 재조회하고 최신 이미지를 적용한다
+
+# ── Pre-Play: bastion(nat) hostvars 강제 로드 ─────────────────────────
+# 문제: ansible-playbook 실행 시 hosts: k8s 플레이의 SSH 연결 시점에
+#       hostvars['nat']['ansible_host'] 가 아직 메모리에 로드되지 않아
+#       group_vars/k8s.yml 의 ansible_ssh_common_args(ProxyCommand)가 빈 값으로
+#       렌더링되어 ProxyCommand 없이 직접 사설 IP에 접속을 시도하다 timeout 발생.
+#
+# 해결: 최초 플레이에서 bastion 그룹(nat 호스트)을 대상으로 gather_facts를 실행해
+#       hostvars['nat'] 를 완전히 채워 넣는다. 이후 k8s 플레이들이 실행될 때
+#       hostvars['nat']['ansible_host'] 가 정상 참조되어 ProxyCommand가 주입된다.
+#
+# tags: always → --tags common/master/... 등 다른 태그로 실행해도 항상 실행됨
+- name: Pre-load bastion hostvars (ProxyCommand 렌더링을 위한 선행 플레이)
+  hosts: bastion
+  gather_facts: true
+  tags: always
+
+- import_playbook: playbooks/01-common.yml
+- import_playbook: playbooks/02-gpu.yml
+- import_playbook: playbooks/03-master.yml
+- import_playbook: playbooks/04-worker.yml
+- import_playbook: playbooks/05-addons.yml
+- import_playbook: playbooks/06-deploy-k8s.yml

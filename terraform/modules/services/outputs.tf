@@ -1,0 +1,1 @@
+# Outputs moved to ecr and s3 modules

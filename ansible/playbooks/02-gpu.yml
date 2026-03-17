@@ -1,0 +1,120 @@
+---
+# ============================================================
+# 플레이북: 02-gpu.yml
+# 대상: workers 그룹 (g4dn.xlarge, NVIDIA T4 GPU 노드)
+# 레이어: 인프라 레이어 - GPU 특화 OS 환경 구성
+#
+# 목적:
+#   Worker Node의 물리 GPU(T4)를 컨테이너 안에서 사용할 수 있도록
+#   OS 수준의 드라이버와 런타임 브릿지를 설치한다.
+#
+# 실행 조건:
+#   group_vars/all.yml의 gpu_enabled: true 일 때만 실행.
+#   t3.medium 검증 단계(gpu_enabled: false)에서는 플레이북 전체가 스킵된다.
+#
+# nvidia-device-plugin과의 역할 분리:
+#   이 플레이북은 OS/드라이버 레이어 담당 (apt install, 재부팅).
+#   nvidia-device-plugin은 K8s 레이어 담당 (kubectl apply) →  05-addons.yml.
+#   클러스터가 존재해야 DaemonSet을 배포할 수 있으므로
+#   03(마스터 init) → 04(워커 join) 이후인 05에서 배포한다.
+#
+# 실행 순서상 위치:
+#   01-common → [02-gpu] → 03-master → 04-worker → 05-addons
+# ============================================================
+- name: GPU node setup (NVIDIA Driver + Container Toolkit)
+  hosts: workers
+  become: true
+  tags: gpu
+
+  handlers:
+    # NVIDIA 런타임 설정 변경 후 containerd를 재시작하여 반영
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    # gpu_enabled: false(t3.medium 단계)이면 블록 전체를 스킵한다.
+    # when은 Play 레벨이 아닌 task/block 레벨에서만 유효하므로 block으로 감쌈.
+    - block:
+        # ── NVIDIA Driver 설치 ──────────────────────────────
+        # g4dn.xlarge의 T4 GPU는 OS가 드라이버를 통해 인식한다.
+        # 드라이버 없이는 nvidia-smi 명령도 실패하고,
+        # 컨테이너 안에서 GPU를 전혀 사용할 수 없다.
+        #
+        # ubuntu-drivers autoinstall:
+        #   현재 커널과 GPU 모델에 맞는 드라이버를 자동으로 선택하여 설치.
+        #   Amazon Linux 2에서는 CUDA repo를 수동 구성하고 DKMS로 빌드해야 했으나,
+        #   Ubuntu는 이 한 줄로 대체된다. Ubuntu를 선택한 핵심 이유 중 하나.
+        - name: Install ubuntu-drivers-common
+          apt:
+            name: ubuntu-drivers-common
+            state: present
+            update_cache: true
+
+        - name: Install NVIDIA driver (ubuntu-drivers autoinstall)
+          command: ubuntu-drivers autoinstall
+          register: nvidia_driver_installed
+
+        # 드라이버는 커널 모듈로 동작하므로 설치 후 재부팅해야 로드된다.
+        # changed_when을 활용해 드라이버가 새로 설치된 경우에만 재부팅하고,
+        # 이미 설치된 상태에서 플레이북을 재실행하면 재부팅을 스킵한다.
+        - name: Reboot to load NVIDIA driver
+          reboot:
+            reboot_timeout: 300
+          when: nvidia_driver_installed.changed
+
+        # 재부팅 후 드라이버가 정상 로드되었는지 확인.
+        # nvidia-smi 실패 시 이후 단계를 진행하지 않아 문제를 조기에 발견한다.
+        - name: Verify NVIDIA driver loaded (nvidia-smi)
+          command: nvidia-smi
+          changed_when: false
+
+        # ── NVIDIA Container Toolkit 설치 ───────────────────
+        # 역할: 컨테이너 내부에서 호스트의 GPU 자원에 접근할 수 있게 해주는 가교.
+        #
+        # 동작 원리:
+        #   containerd가 컨테이너를 시작할 때 nvidia-container-runtime을 호출하고,
+        #   이 런타임이 NVIDIA 드라이버 라이브러리를 컨테이너 안에 바인드 마운트한다.
+        #   그 결과 컨테이너 안에서 GPU가 /dev/nvidia* 장치로 보이게 된다.
+        - name: Add NVIDIA container toolkit GPG key
+          shell: |
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+              | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+          args:
+            creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+        - name: Add NVIDIA container toolkit apt repository
+          shell: |
+            curl -sL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+              | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+              > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+          args:
+            creates: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+        - name: Install nvidia-container-toolkit
+          apt:
+            name: nvidia-container-toolkit
+            state: present
+            update_cache: true
+
+        # nvidia-ctk runtime configure:
+        #   containerd의 config.toml을 자동으로 수정하여
+        #   기본 런타임을 nvidia-container-runtime으로 교체한다.
+        #   --set-as-default: 모든 컨테이너가 별도 설정 없이도 GPU를 사용 가능하게 함.
+        #
+        #   가장 흔한 실수: 드라이버와 툴킷을 설치하고 이 단계를 빠뜨리는 것.
+        #   이 설정 없이는 Pod의 spec에 nvidia.com/gpu: 1을 선언해도
+        #   컨테이너에서 GPU를 인식하지 못하고 CrashLoopBackOff가 발생한다.
+        - name: Configure containerd to use NVIDIA runtime as default
+          command: >
+            nvidia-ctk runtime configure
+            --runtime=containerd
+            --set-as-default
+          notify: restart containerd
+
+        - name: Ensure containerd is restarted after NVIDIA config
+          meta: flush_handlers
+
+      when: gpu_enabled | bool

@@ -1,0 +1,90 @@
+# ============================================================
+# 파일: 02-stain-classification.yaml
+# 목적: 얼룩 분류 AI 서비스 배포 및 클러스터 내부 노출
+# 리소스: Deployment + Service (ClusterIP)
+#
+# GPU 사용 여부: ❌ CPU 전용 (GPU 불필요)
+# 배포 단계: Phase 1 (t3.medium 검증 단계부터 배포 가능) - make deploy-cpu
+#
+# GPU를 사용하지 않는 이유:
+#   분류(Classification) 모델은 탐지(Detection)보다 경량이며
+#   onnxruntime-cpu 또는 scikit-learn 기반으로 CPU에서도 충분한 성능이 나온다.
+#   GPU 노드에 Taint가 걸려 있어 Toleration 없는 이 Pod는
+#   자동으로 일반 노드(Control Plane 외)에 스케줄된다.
+#
+# ✏️  배포 전 필수 수정:
+#   image 필드의 <AWS_ACCOUNT_ID>를 실제 AWS 계정 ID로 교체
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stain-classification
+  namespace: microlens
+  labels:
+    app: stain-classification
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stain-classification
+  template:
+    metadata:
+      labels:
+        app: stain-classification
+    spec:
+      serviceAccountName: microlens-sa
+      containers:
+        - name: stain-classification
+          # aws_account_id: Ansible 06-deploy-k8s.yml이 aws sts get-caller-identity로 자동 주입
+          image: {{ aws_account_id }}.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_BUCKET
+              value: "microlens-model-weights"
+            - name: AWS_REGION
+              value: "ap-northeast-2"
+            - name: MODEL_KEY
+              value: "models/stain-classification/weights.pt"
+          resources:
+            # CPU 전용: nvidia.com/gpu 항목 없음.
+            # GPU 노드에 Taint가 걸려있어 이 Pod는 GPU 노드를 점유하지 않는다.
+            # stain-detection/teeth 대비 메모리 요구량이 낮으므로 1Gi로 설정.
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          # GPU 모델 로딩이 없으므로 initialDelaySeconds를 더 짧게 설정 가능
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          # tolerations 없음: GPU 노드의 Taint를 허용하지 않아
+          # 비싼 GPU 자원을 점유하지 않고 일반 노드에만 배치된다.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stain-classification-svc
+  namespace: microlens
+spec:
+  selector:
+    app: stain-classification
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

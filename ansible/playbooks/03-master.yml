@@ -1,0 +1,121 @@
+---
+# ============================================================
+# 플레이북: 03-master.yml
+# 대상: masters 그룹 (Control Plane 1대)
+# 레이어: 인프라 레이어 - K8s 클러스터 초기화
+#
+# 목적:
+#   kubeadm init으로 Control Plane을 초기화하고,
+#   Calico CNI를 설치하여 Pod 간 통신망을 구축한다.
+#   또한 Worker Node가 나중에 합류할 수 있도록 join 커맨드를 준비한다.
+#
+# 실행 순서상 위치:
+#   01-common → 02-gpu → [03-master] → 04-worker → 05-addons
+#   반드시 01-common 이후에 실행해야 한다 (containerd, kubelet이 설치되어야 함).
+#   04-worker보다 먼저 실행되어야 join 커맨드를 생성할 수 있다.
+# ============================================================
+- name: Initialize Kubernetes control plane
+  hosts: masters
+  become: true
+  tags: master
+
+  tasks:
+    # 멱등성 보장: /etc/kubernetes/admin.conf가 이미 있으면
+    # kubeadm init을 재실행하지 않는다.
+    # 플레이북을 여러 번 실행해도 안전하다.
+    - name: Check if cluster already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_init_done
+
+    # --pod-network-cidr:
+    #   Calico의 기본 CIDR인 192.168.0.0/16으로 설정.
+    #   이 값이 Calico 설정과 일치해야 Pod IP가 올바르게 할당된다.
+    #   불일치 시 Pod들이 IP를 받지 못하거나 라우팅이 안 된다.
+    #
+    # --apiserver-advertise-address:
+    #   Worker Node들이 API 서버에 접속할 때 사용하는 주소.
+    #   프라이빗 서브넷이므로 노드의 프라이빗 IP를 사용한다.
+    #   퍼블릭 IP를 쓰면 VPC 내부 통신이 외부를 우회하게 된다.
+    - name: Run kubeadm init
+      command: >
+        kubeadm init
+        --pod-network-cidr={{ pod_cidr }}
+        --apiserver-advertise-address={{ ansible_default_ipv4.address }}
+      when: not kubeadm_init_done.stat.exists
+      register: kubeadm_init_output
+
+    # ── kubeconfig 설정 ────────────────────────────────────
+    # kubectl은 ~/.kube/config 를 읽어 API 서버 주소와 인증 정보를 얻는다.
+    # admin.conf를 복사하지 않으면 kubectl 명령이 모두 실패한다.
+    # root와 ubuntu 두 계정 모두에 설정하여 어느 계정으로 접속해도
+    # 즉시 kubectl을 사용할 수 있도록 한다.
+    - name: Create .kube directory for root
+      file:
+        path: /root/.kube
+        state: directory
+        mode: "0700"
+
+    - name: Copy admin.conf to root kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: true
+        mode: "0600"
+
+    - name: Create .kube directory for ubuntu
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Copy admin.conf to ubuntu kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: true
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+
+    # ── Calico CNI 설치 ────────────────────────────────────
+    # CNI(Container Network Interface)가 없으면 Pod들이 IP를 받지 못하고
+    # NotReady 상태로 머물며, 노드도 Ready가 되지 않는다.
+    #
+    # Calico를 선택한 이유:
+    #   - NetworkPolicy를 통한 서비스 간 트래픽 L4 격리 지원
+    #   - BGP 기반 효율적 라우팅
+    #   - AWS 환경에서는 IPIP 모드(기본값)로 동작하여 VPC 라우팅과 호환
+    #
+    # IPIP 모드: 패킷을 IP-in-IP로 캡슐화하여 VPC의 서브넷 경계를 넘어
+    #            Pod 간 통신이 가능하게 한다. CrossSubnet 설정을 쓰면
+    #            같은 서브넷 내에서는 캡슐화 없이 직접 라우팅하여 성능을 높일 수 있다.
+    - name: Download Calico manifest
+      get_url:
+        url: https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml
+        dest: /tmp/calico.yaml
+
+    # become: false: ubuntu 계정의 kubeconfig를 사용하기 위해 root 권한 해제
+    - name: Apply Calico CNI
+      become: false
+      command: kubectl apply -f /tmp/calico.yaml
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+
+    # ── Join 커맨드 저장 ───────────────────────────────────
+    # kubeadm init 시 생성된 토큰은 기본 24시간 후 만료된다.
+    # kubeadm token create --print-join-command 로 새 토큰을 발급받아
+    # Ansible 컨트롤러의 /tmp에 저장한다.
+    # 04-worker.yml에서 이 파일을 읽어 각 Worker Node에서 실행한다.
+    - name: Generate kubeadm join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Save join command to Ansible controller
+      local_action:
+        module: copy
+        content: "{{ join_command.stdout }}"
+        dest: /tmp/kubeadm_join_command
+      become: false

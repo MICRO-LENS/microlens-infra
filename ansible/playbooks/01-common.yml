@@ -1,0 +1,192 @@
+---
+# ============================================================
+# 플레이북: 01-common.yml
+# 대상: k8s 그룹 전체 (Control Plane + Worker Nodes)
+# 레이어: 인프라 레이어 - OS 수준 공통 환경 구성
+#
+# 목적:
+#   모든 K8s 노드가 공유해야 하는 런타임 환경을 세팅한다.
+#   이 플레이북이 완료된 후에야 kubeadm으로 클러스터를 구성할 수 있다.
+#
+# 실행 순서상 위치:
+#   01-common → 02-gpu → 03-master → 04-worker → 05-addons
+#   가장 먼저 실행되어야 하며, 나머지 모든 플레이북의 전제 조건이다.
+# ============================================================
+- name: Common K8s node setup
+  hosts: k8s
+  become: true
+  tags: common
+
+  handlers:
+    # containerd 설정 변경 시 자동으로 재시작하기 위한 핸들러
+    # notify: restart containerd 를 통해 호출됨
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    # ── 스왑 비활성화 ──────────────────────────────────────
+    # K8s는 스왑 메모리를 허용하지 않는다.
+    # 스왑이 활성화된 상태에서 kubelet을 시작하면 오류로 종료된다.
+    # swapoff -a: 즉시 비활성화 / fstab 수정: 재부팅 후에도 유지
+    - name: Disable swap immediately
+      command: swapoff -a
+
+    - name: Remove swap entry from fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '\sswap\s'
+        state: absent
+
+    # ── 커널 모듈 ──────────────────────────────────────────
+    # overlay: containerd가 컨테이너 레이어 파일시스템(OverlayFS)을 구성할 때 사용
+    # br_netfilter: 브릿지 네트워크의 트래픽이 iptables를 통과하도록 허용.
+    #              이것이 없으면 아래 sysctl 설정이 적용되지 않아
+    #              K8s 네트워크 정책(NetworkPolicy)이 동작하지 않는다.
+    - name: Load required kernel modules
+      modprobe:
+        name: "{{ item }}"
+      loop:
+        - overlay
+        - br_netfilter
+
+    # 재부팅 후에도 모듈이 자동으로 로드되도록 영구 등록
+    - name: Persist kernel modules on boot
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    # ── sysctl (네트워크 파라미터 최적화) ─────────────────
+    # bridge-nf-call-iptables/ip6tables:
+    #   브릿지를 통과하는 IPv4/IPv6 패킷이 iptables 규칙을 거치도록 설정.
+    #   Calico 등 CNI 플러그인이 네트워크 정책을 올바르게 적용하려면 필수.
+    # ip_forward:
+    #   노드 간 Pod 트래픽 포워딩을 허용. 이것이 0이면 Pod 간 통신 불가.
+    - name: Set K8s sysctl parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        reload: true
+      loop:
+        - { key: net.bridge.bridge-nf-call-iptables,  value: "1" }
+        - { key: net.bridge.bridge-nf-call-ip6tables, value: "1" }
+        - { key: net.ipv4.ip_forward,                 value: "1" }
+
+    # ── containerd 설치 및 설정 ────────────────────────────
+    # K8s 1.24부터 Docker shim이 제거되어 containerd가 표준 CRI가 됨.
+    # Docker 전체를 설치하는 대신 containerd.io만 설치하여 경량화.
+    # containerd.io 패키지는 Docker CE 저장소에서 제공한다.
+    - name: Install apt prerequisites
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gpg
+        state: present
+        update_cache: true
+
+    - name: Create apt keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker CE GPG key (provides containerd.io)
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+          -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+      args:
+        creates: /etc/apt/keyrings/docker.asc
+
+    - name: Add Docker CE apt repository
+      shell: |
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] \
+          https://download.docker.com/linux/ubuntu \
+          $(lsb_release -cs) stable" \
+          > /etc/apt/sources.list.d/docker.list
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+
+    - name: Install containerd.io
+      apt:
+        name: containerd.io
+        state: present
+        update_cache: true
+
+    # containerd config default: 기본 설정 파일 생성.
+    # 이 파일 없이 containerd를 시작하면 내장 기본값으로 실행되는데,
+    # 그 경우 SystemdCgroup이 false로 설정되어 아래 수정이 적용되지 않는다.
+    - name: Create containerd config directory
+      file:
+        path: /etc/containerd
+        state: directory
+
+    - name: Generate default containerd config
+      shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    # SystemdCgroup = true 설정의 이유:
+    #   kubelet과 containerd가 각각 cgroup을 관리할 때 방식을 일치시켜야 한다.
+    #   불일치하면 노드 자원 회수가 제대로 안 되고, OOM 발생 시 Pod가
+    #   정상 종료되지 않는 등 클러스터 불안정 문제가 생긴다.
+    #   Ubuntu의 init 시스템은 systemd이므로 systemd cgroup driver를 사용해야 한다.
+    - name: Enable SystemdCgroup in containerd config
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: restart containerd
+
+    - name: Enable and start containerd
+      systemd:
+        name: containerd
+        enabled: true
+        state: started
+
+    # ── K8s 패키지 설치 ────────────────────────────────────
+    # pkgs.k8s.io: K8s 1.24부터 Google 저장소 대신 사용하는 공식 저장소.
+    # k8s_version 변수(group_vars/all.yml)로 버전을 통일 관리한다.
+    - name: Add Kubernetes GPG key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key \
+          | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
+          https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /
+
+    - name: Install kubelet, kubeadm, kubectl (버전 고정)
+      apt:
+        name:
+          - "kubelet={{ k8s_version }}.*"
+          - "kubeadm={{ k8s_version }}.*"
+          - "kubectl={{ k8s_version }}.*"
+        state: present
+        update_cache: true
+
+    # ── 버전 고정 (apt-mark hold) ──────────────────────────
+    # 운영 중인 클러스터에서 apt upgrade 실행 시 K8s 버전이 의도치 않게
+    # 올라가면 API 호환성이 깨져 클러스터 전체가 장애를 일으킬 수 있다.
+    # apt-mark hold로 kubelet/kubeadm/kubectl을 잠가두고,
+    # 업그레이드가 필요할 때만 apt-mark unhold 후 수동으로 진행한다.
+    - name: Pin K8s packages to current version (apt-mark hold)
+      command: apt-mark hold kubelet kubeadm kubectl
+
+    - name: Enable and start kubelet
+      systemd:
+        name: kubelet
+        enabled: true
+        state: started
