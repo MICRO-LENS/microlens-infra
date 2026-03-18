@@ -1,0 +1,67 @@
+---
+# ============================================================
+# 플레이북: 09-upload-models.yml
+# 대상: localhost (Ansible 제어 머신에서 직접 실행)
+# 목적: models/ 디렉토리의 .onnx 파일을 S3 버킷에 업로드
+#
+# 실행 시점:
+#   - 최초 클러스터 구성 후 1회
+#   - 모델 재학습 후 새 버전 배포 시
+#
+# 실행 방법:
+#   ansible-playbook ansible/playbooks/09-upload-models.yml
+#
+# 전제 조건:
+#   - AWS CLI 설치 및 자격증명 구성 (jina IAM user)
+#   - microlens-model-weights 버킷 존재 (Terraform으로 생성됨)
+# ============================================================
+- name: Upload model weights to S3
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    model_bucket: "microlens-model-weights"
+    models_dir: "{{ playbook_dir }}/../../models"
+    s3_prefix: "models"
+
+  tasks:
+    - name: Check models directory exists
+      stat:
+        path: "{{ models_dir }}"
+      register: models_stat
+
+    - name: Fail if models directory is missing
+      fail:
+        msg: "models/ 디렉토리를 찾을 수 없습니다: {{ models_dir }}"
+      when: not models_stat.stat.exists
+
+    - name: Find .onnx files
+      find:
+        paths: "{{ models_dir }}"
+        patterns: "*.onnx"
+      register: onnx_files
+
+    - name: Fail if no .onnx files found
+      fail:
+        msg: "models/ 디렉토리에 .onnx 파일이 없습니다."
+      when: onnx_files.files | length == 0
+
+    - name: Upload each .onnx file to S3
+      command: >
+        aws s3 cp
+        {{ item.path }}
+        s3://{{ model_bucket }}/{{ s3_prefix }}/{{ item.path | basename }}
+        --region ap-northeast-2
+      loop: "{{ onnx_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Verify uploaded files
+      command: aws s3 ls s3://{{ model_bucket }}/{{ s3_prefix }}/ --region ap-northeast-2
+      register: s3_list
+      changed_when: false
+
+    - name: Show uploaded files
+      debug:
+        msg: "{{ s3_list.stdout_lines }}"
