@@ -17,10 +17,10 @@ resources:
 images:
 - name: stain-classification-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
-  newTag: ca7d15d
+  newTag: 56b8e60
 - name: stain-detection-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
-  newTag: ca7d15d
+  newTag: 56b8e60
 - name: teeth-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
-  newTag: ca7d15d
+  newTag: 56b8e60
