@@ -32,9 +32,8 @@ module "ec2" {
   # jenkins_port                  = 8080
   # jenkins_webhook_allowed_cidrs = ["140.82.112.0/20", "185.199.108.0/22"]
 
-  # 검증 단계: t3.medium × 2 / g4dn 쿼타 승인 후: worker_instance_type = "g4dn.xlarge"
-  worker_instance_type = "t3.medium"
-  worker_count         = 2  # g4dn 쿼타 승인 후 worker_instance_type = "g4dn.xlarge" 로 변경
+  worker_instance_type = "g4dn.xlarge"
+  worker_count         = 2
 }
 
 output "vpc_id" {
