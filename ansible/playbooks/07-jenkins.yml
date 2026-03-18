@@ -231,24 +231,175 @@
       ignore_errors: true
       changed_when: false
 
-    # ── Jenkins 초기 패스워드 출력 ────────────────────────
-    # 설치 후 웹 UI 최초 접속 시 필요한 초기 관리자 비밀번호.
-    # 출력된 값을 http://<JENKINS_PUBLIC_IP>:8080 접속 후 입력한다.
-    - name: Wait for Jenkins initial password file
-      wait_for:
-        path: /var/lib/jenkins/secrets/initialAdminPassword
-        timeout: 60
-
-    - name: Print Jenkins initial admin password
+    # ── Jenkins 관리자 비밀번호 확정 ─────────────────────────
+    # group_vars/jenkins.yml의 jenkins_admin_password가 설정되어 있으면 그 값 사용.
+    # 비어있으면 /var/lib/jenkins/secrets/initialAdminPassword 파일에서 읽는다.
+    # (최초 설치 직후에만 파일이 존재하며, 이후엔 group_vars 값을 직접 입력해야 함)
+    - name: Read initial password from file (jenkins_admin_password 미설정 시)
       command: cat /var/lib/jenkins/secrets/initialAdminPassword
-      register: jenkins_initial_password
+      register: jenkins_password_file
       changed_when: false
+      failed_when: false
+      when: jenkins_admin_password == ""
 
-    - name: Show Jenkins initial admin password
-      debug:
+    - name: Set jenkins_admin_password from file (최초 설치 시)
+      set_fact:
+        jenkins_admin_password: "{{ jenkins_password_file.stdout }}"
+      when: jenkins_admin_password == "" and jenkins_password_file.stdout is defined and jenkins_password_file.stdout != ""
+
+    - name: Verify jenkins_admin_password is set
+      fail:
         msg: |
-          ============================================================
-          Jenkins 초기 관리자 비밀번호:  {{ jenkins_initial_password.stdout }}
-          접속 URL: http://<Jenkins EIP>:8080
-          (EIP 확인: terraform output 또는 AWS 콘솔 → EC2 → microlens-jenkins)
-          ============================================================
+          jenkins_admin_password가 설정되지 않았습니다.
+          ansible/inventory/group_vars/jenkins.yml 에 비밀번호를 입력하세요:
+            jenkins_admin_password: "your-password"
+      when: jenkins_admin_password == ""
+
+    - name: Show Jenkins access info
+      debug:
+        msg:
+          - "============================================================"
+          - "Jenkins 접속 URL: http://<Jenkins EIP>:8080"
+          - "(EIP 확인: terraform output 또는 AWS 콘솔 → EC2 → microlens-jenkins)"
+          - "============================================================"
+
+    # ── Setup Wizard 자동 건너뛰기 ──────────────────────────
+    # Jenkins 최초 기동 시 Setup Wizard(초기 설정 화면)가 표시된다.
+    # UpgradeWizard.state 파일에 "2.0"을 기록하면
+    # Wizard 없이 바로 운영 상태로 진입하여 API 호출이 가능해진다.
+    - name: Skip Jenkins setup wizard
+      copy:
+        dest: /var/lib/jenkins/jenkins.install.UpgradeWizard.state
+        content: "2.0"
+        owner: jenkins
+        group: jenkins
+        mode: "0644"
+      register: wizard_state
+
+    - name: Restart Jenkins to apply wizard skip
+      systemd:
+        name: jenkins
+        state: restarted
+      when: wizard_state.changed
+
+    # Jenkins가 재시작 완료되어 API를 받을 준비가 될 때까지 대기
+    - name: Wait for Jenkins to be fully operational
+      uri:
+        url: "http://localhost:8080/login"
+        status_code: 200
+      register: jenkins_ready
+      until: jenkins_ready.status == 200
+      retries: 18
+      delay: 10
+
+    # ── 필수 플러그인 설치 ──────────────────────────────────
+    # Jenkins CLI로 필수 플러그인을 설치한다.
+    # ssh-credentials : GitHub Deploy Key(SSH 개인키) Credential 타입 제공
+    # git             : Pipeline에서 git checkout 지원
+    # workflow-aggregator : Pipeline(Jenkinsfile) 실행 엔진
+    - name: Download Jenkins CLI jar
+      get_url:
+        url: "http://localhost:8080/jnlpJars/jenkins-cli.jar"
+        dest: /tmp/jenkins-cli.jar
+        force: true
+
+    - name: Install required Jenkins plugins
+      command: >
+        java -jar /tmp/jenkins-cli.jar
+        -s http://localhost:8080
+        -auth {{ jenkins_admin_user }}:{{ jenkins_admin_password }}
+        install-plugin ssh-credentials git workflow-aggregator -restart
+      register: plugin_install
+      changed_when: plugin_install.rc == 0
+      failed_when: false
+
+    # 플러그인 설치 후 Jenkins가 재시작되므로 다시 대기
+    # port: 8080 오픈은 Jenkins 내부 초기화 완료를 보장하지 않는다.
+    # /login 이 200을 반환할 때까지 반복 확인하여 완전한 준비 상태를 보장한다.
+    - name: Wait for Jenkins to be fully ready after plugin installation
+      uri:
+        url: "http://localhost:8080/login"
+        status_code: 200
+        validate_certs: false
+      register: jenkins_login_ready
+      until: jenkins_login_ready.status == 200
+      retries: 24
+      delay: 10
+
+    # ── GitHub PAT Jenkins Credentials 등록 ─────────────────
+    # 조직 정책으로 SSH Deploy Key가 차단된 경우 PAT(Personal Access Token)으로 대체.
+    # PAT는 HTTPS git 인증에 사용되며, Jenkinsfile의 git clone/push URL도
+    # ssh → https 방식으로 변경해야 한다.
+    #
+    # 사전 준비:
+    #   github.com → Settings → Developer settings → Personal access tokens
+    #   → Generate new token (classic) → repo 스코프 체크 → 생성
+    #   → inventory/group_vars/jenkins.yml 의 github_pat 에 입력
+    #
+    # Jenkins 2.x CSRF 보호: 크럼(Crumb) + 세션 쿠키(JSESSIONID)를 함께 전송.
+    - name: Get Jenkins CSRF crumb
+      uri:
+        url: "http://localhost:8080/crumbIssuer/api/json"
+        method: GET
+        user: "{{ jenkins_admin_user }}"
+        password: "{{ jenkins_admin_password }}"
+        force_basic_auth: true
+        return_content: true
+        status_code: 200
+      register: crumb_response
+      until: crumb_response.status == 200
+      retries: 12
+      delay: 10
+      no_log: true
+
+    # 크럼 응답의 set_cookie에서 JSESSIONID 값만 추출 (';' 이후 옵션 제거)
+    - name: Extract session cookie from crumb response
+      set_fact:
+        jenkins_session_cookie: "{{ crumb_response.set_cookie.split(';')[0] }}"
+
+    # 멱등성 보장: 이미 등록된 경우 재등록하지 않는다 (404면 미등록 상태)
+    - name: Check if GitHub PAT credential already exists
+      uri:
+        url: "http://localhost:8080/credentials/store/system/domain/_/credential/github-pat/api/json"
+        method: GET
+        user: "{{ jenkins_admin_user }}"
+        password: "{{ jenkins_admin_password }}"
+        force_basic_auth: true
+        status_code: [200, 404]
+      register: cred_check
+      failed_when: false
+
+    # UsernamePasswordCredentialsImpl: HTTPS git 인증용 PAT 등록
+    # username: GitHub 사용자명 또는 org명 (HTTPS URL의 인증 주체)
+    # password: PAT 토큰 값 (repo 스코프 필요)
+    - name: Register GitHub PAT in Jenkins Credentials
+      uri:
+        url: "http://localhost:8080/credentials/store/system/domain/_/createCredentials"
+        method: POST
+        user: "{{ jenkins_admin_user }}"
+        password: "{{ jenkins_admin_password }}"
+        force_basic_auth: true
+        headers:
+          Jenkins-Crumb: "{{ (crumb_response.content | from_json).crumb }}"
+          Cookie: "{{ jenkins_session_cookie }}"
+        body_format: form-urlencoded
+        body:
+          json: "{{ credential_payload | to_json }}"
+        status_code: [200, 302]
+      vars:
+        credential_payload:
+          "": "0"
+          credentials:
+            scope: GLOBAL
+            id: github-pat
+            description: "GitHub PAT for microlens-infra HTTPS push (auto-registered by Ansible)"
+            username: "{{ github_username }}"
+            password: "{{ github_pat }}"
+            stapler-class: "com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl"
+            "$class": "com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl"
+      no_log: true
+      when: cred_check is defined and cred_check.status | default(0) == 404
+
+    - name: Show PAT registration result
+      debug:
+        msg: "{{ 'GitHub PAT 등록 완료 (github-pat)' if (cred_check is defined and cred_check.status | default(0) == 404) else 'GitHub PAT 이미 등록되어 있음 — 스킵' }}"
