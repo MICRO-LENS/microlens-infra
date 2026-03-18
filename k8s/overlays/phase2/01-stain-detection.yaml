@@ -16,6 +16,23 @@ spec:
         app: stain-detection
     spec:
       serviceAccountName: microlens-sa
+      # init container가 S3에서 모델을 model-volume에 다운로드한 뒤
+      # 메인 컨테이너가 /app/models 로 마운트해서 사용한다.
+      initContainers:
+        - name: download-model
+          image: amazon/aws-cli:latest
+          command:
+            - aws
+            - s3
+            - cp
+            - s3://microlens-model-weights/models/stain_detection_best.onnx
+            - /models/stain_detection_best.onnx
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: "ap-northeast-2"
+          volumeMounts:
+            - name: model-volume
+              mountPath: /models
       containers:
         - name: stain-detection
           # overlay의 images: 블록이 이 이름을 기준으로 ECR URL + 커밋 SHA 태그로 교체한다
@@ -30,7 +47,10 @@ spec:
             - name: AWS_REGION
               value: "ap-northeast-2"
             - name: MODEL_KEY
-              value: "models/stain-detection/weights.pt"
+              value: "models/stain_detection_best.onnx"
+          volumeMounts:
+            - name: model-volume
+              mountPath: /app/models
           resources:
             requests:
               cpu: "500m"
@@ -44,16 +64,19 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 120
             periodSeconds: 15
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 20
+            initialDelaySeconds: 90
             periodSeconds: 10
             failureThreshold: 3
+      volumes:
+        - name: model-volume
+          emptyDir: {}
       nodeSelector:
         node-type: gpu
       tolerations:
