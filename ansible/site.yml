@@ -8,7 +8,9 @@
 #   ansible-playbook site.yml --tags master
 #   ansible-playbook site.yml --tags worker
 #   ansible-playbook site.yml --tags addons
-#   ansible-playbook site.yml --tags k8s-deploy  # K8s 매니페스트 렌더링 및 배포
+#   ansible-playbook site.yml --tags k8s-deploy  # [DEPRECATED] ArgoCD로 대체됨
+#   ansible-playbook site.yml --tags jenkins      # Jenkins CI 서버 설치
+#   ansible-playbook site.yml --tags argocd       # ArgoCD 설치 + microlens Application 등록
 #
 # K8s 매니페스트만 재배포:
 #   ansible-playbook site.yml --tags k8s-deploy
@@ -37,3 +39,5 @@
 - import_playbook: playbooks/04-worker.yml
 - import_playbook: playbooks/05-addons.yml
 - import_playbook: playbooks/06-deploy-k8s.yml
+- import_playbook: playbooks/07-jenkins.yml
+- import_playbook: playbooks/08-argocd.yml

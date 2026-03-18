@@ -1,0 +1,254 @@
+---
+# ============================================================
+# 플레이북: 07-jenkins.yml
+# 대상: jenkins 그룹 (퍼블릭 서브넷 EC2, t3.medium)
+# 레이어: CI 레이어 - Jenkins 서버 초기 설정
+#
+# 목적:
+#   GitHub Webhook을 수신하여 Docker 이미지를 빌드하고
+#   ECR에 푸시한 뒤 배포 레포(microlens-infra)의 Kustomize
+#   이미지 태그를 갱신하는 CI 서버를 구성한다.
+#
+# 설치 항목:
+#   - Java 17 LTS       : Jenkins 런타임
+#   - Jenkins LTS       : CI 서버 (포트 8080)
+#   - Docker CE         : 이미지 빌드
+#   - AWS CLI v2        : ECR 인증 (aws ecr get-login-password)
+#   - kubectl           : K8s 클러스터 상태 확인용
+#   - kustomize         : overlays/production 이미지 태그 갱신
+#   - git               : 배포 레포 클론/푸시
+#
+# 실행:
+#   ansible-playbook playbooks/07-jenkins.yml --tags jenkins
+#   ansible-playbook site.yml --tags jenkins
+# ============================================================
+- name: Jenkins CI server setup
+  hosts: jenkins
+  become: true
+  tags: jenkins
+
+  handlers:
+    - name: restart jenkins
+      systemd:
+        name: jenkins
+        state: restarted
+        daemon_reload: true
+
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    # ── apt 사전 패키지 ────────────────────────────────────
+    - name: Install apt prerequisites
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - unzip
+          - git
+        state: present
+        update_cache: true
+
+    # ── Java 17 ───────────────────────────────────────────
+    # Jenkins LTS 2.x는 Java 11+를 요구하고, 17 LTS를 권장한다.
+    - name: Install Java 17 LTS
+      apt:
+        name: openjdk-17-jdk-headless
+        state: present
+        update_cache: true
+
+    - name: Set JAVA_HOME system-wide
+      copy:
+        dest: /etc/profile.d/java.sh
+        content: |
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH=$JAVA_HOME/bin:$PATH
+
+    # ── Jenkins LTS ───────────────────────────────────────
+    # Jenkins 공식 Debian 저장소 추가
+    # gpg --dearmor 방식은 Ubuntu 22.04에서 키 검증 실패가 발생할 수 있음.
+    # Jenkins 공식 문서 권장: ASCII armored (.asc) 형식으로 직접 저장.
+    - name: Add Jenkins GPG key (ASCII armored)
+      # creates 생략: 키 URL이 바뀌어도 항상 최신 키를 받도록 한다.
+      # creates를 쓰면 구버전 키 파일이 있을 때 스킵되어 NO_PUBKEY 오류가 발생한다.
+      get_url:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+        dest: /usr/share/keyrings/jenkins-keyring.asc
+        mode: "0644"
+        force: true
+
+    - name: Add Jenkins apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/jenkins.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/
+
+    - name: Install Jenkins LTS
+      apt:
+        name: jenkins
+        state: present
+        update_cache: true
+
+    - name: Enable and start Jenkins
+      systemd:
+        name: jenkins
+        enabled: true
+        state: started
+
+    # ── Docker CE ─────────────────────────────────────────
+    # Jenkins가 Docker 이미지를 빌드하기 위한 Docker 데몬.
+    # containerd.io는 K8s 노드 전용이므로 Jenkins 서버에는
+    # docker-ce 전체 패키지를 설치한다.
+    - name: Create apt keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker CE GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+          -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+      args:
+        creates: /etc/apt/keyrings/docker.asc
+
+    - name: Add Docker CE apt repository
+      shell: |
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] \
+          https://download.docker.com/linux/ubuntu \
+          $(lsb_release -cs) stable" \
+          > /etc/apt/sources.list.d/docker.list
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+
+    - name: Install Docker CE
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker
+      systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    # jenkins 사용자가 sudo 없이 docker 명령을 실행하려면
+    # docker 그룹에 포함되어야 한다.
+    - name: Add jenkins user to docker group
+      user:
+        name: jenkins
+        groups: docker
+        append: true
+      notify: restart jenkins
+
+    # ── AWS CLI v2 ────────────────────────────────────────
+    # ECR 인증에 사용: aws ecr get-login-password | docker login
+    # Jenkins EC2는 IAM Role(jenkins-role)을 통해 ECR PowerUser 권한을 갖는다.
+    - name: Check AWS CLI version
+      command: aws --version
+      register: awscli_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Download AWS CLI v2 installer
+      get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/awscliv2.zip
+      when: awscli_check.rc != 0 or 'aws-cli/2' not in awscli_check.stdout
+
+    - name: Unzip AWS CLI v2 installer
+      unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp/
+        remote_src: true
+      when: awscli_check.rc != 0 or 'aws-cli/2' not in awscli_check.stdout
+
+    - name: Install AWS CLI v2
+      command: /tmp/aws/install --update
+      when: awscli_check.rc != 0 or 'aws-cli/2' not in awscli_check.stdout
+
+    # ── kubectl ───────────────────────────────────────────
+    # K8s 클러스터 상태 확인 및 매니페스트 검증용.
+    # 실제 배포는 Argo CD가 담당하므로 파이프라인에서 apply는 하지 않는다.
+    - name: Add Kubernetes GPG key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key \
+          | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /
+
+    - name: Install kubectl
+      apt:
+        name: kubectl
+        state: present
+        update_cache: true
+
+    # ── kustomize ─────────────────────────────────────────
+    # Jenkins 파이프라인에서 overlays/production/kustomization.yaml의
+    # 이미지 태그를 갱신하는 데 사용:
+    #   kustomize edit set image <ECR_REPO>:<NEW_TAG>
+    - name: Check kustomize installed
+      command: kustomize version
+      register: kustomize_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Download and install kustomize
+      shell: |
+        curl -s https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh \
+          | bash -s -- /usr/local/bin
+      when: kustomize_check.rc != 0
+
+    # ── 버전 확인 (디버그) ────────────────────────────────
+    - name: Verify installed tools
+      command: "{{ item }}"
+      loop:
+        - java -version
+        - jenkins --version
+        - docker --version
+        - aws --version
+        - kubectl version --client
+        - kustomize version
+      register: version_check
+      ignore_errors: true
+      changed_when: false
+
+    # ── Jenkins 초기 패스워드 출력 ────────────────────────
+    # 설치 후 웹 UI 최초 접속 시 필요한 초기 관리자 비밀번호.
+    # 출력된 값을 http://<JENKINS_PUBLIC_IP>:8080 접속 후 입력한다.
+    - name: Wait for Jenkins initial password file
+      wait_for:
+        path: /var/lib/jenkins/secrets/initialAdminPassword
+        timeout: 60
+
+    - name: Print Jenkins initial admin password
+      command: cat /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_initial_password
+      changed_when: false
+
+    - name: Show Jenkins initial admin password
+      debug:
+        msg: |
+          ============================================================
+          Jenkins 초기 관리자 비밀번호:  {{ jenkins_initial_password.stdout }}
+          접속 URL: http://<Jenkins EIP>:8080
+          (EIP 확인: terraform output 또는 AWS 콘솔 → EC2 → microlens-jenkins)
+          ============================================================
