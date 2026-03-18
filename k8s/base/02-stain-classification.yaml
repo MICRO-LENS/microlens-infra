@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stain-classification
+  namespace: microlens
+  labels:
+    app: stain-classification
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stain-classification
+  template:
+    metadata:
+      labels:
+        app: stain-classification
+    spec:
+      serviceAccountName: microlens-sa
+      containers:
+        - name: stain-classification
+          # overlay의 images: 블록이 이 이름을 기준으로 ECR URL + 커밋 SHA 태그로 교체한다
+          image: stain-classification-api:latest
+          # SHA 태그는 불변이므로 IfNotPresent로 노드 캐시 활용 (Always 불필요)
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_BUCKET
+              value: "microlens-model-weights"
+            - name: AWS_REGION
+              value: "ap-northeast-2"
+            - name: MODEL_KEY
+              value: "models/stain-classification/weights.pt"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+      nodeSelector:
+        node-type: cpu
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stain-classification-svc
+  namespace: microlens
+spec:
+  selector:
+    app: stain-classification
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

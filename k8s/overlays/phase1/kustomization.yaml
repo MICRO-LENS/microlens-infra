@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Phase 1: CPU 워커 노드(t3.medium) 검증 단계
+# GPU 서비스(stain-detection, teeth)는 포함하지 않음
+# g4dn 쿼타 승인 전 네트워크/Ingress/파이프라인 연결만 검증
+resources:
+  - ../../base
+
+# Jenkins CI가 빌드 완료 후 아래 newTag를 커밋 SHA로 갱신:
+#   kustomize edit set image stain-classification-api=<ECR_URL>/stain-classification-api:<SHA>
+images:
+  - name: stain-classification-api
+    newName: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
+    newTag: "latest"

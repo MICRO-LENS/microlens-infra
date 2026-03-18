@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teeth
+  namespace: microlens
+  labels:
+    app: teeth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: teeth
+  template:
+    metadata:
+      labels:
+        app: teeth
+    spec:
+      serviceAccountName: microlens-sa
+      containers:
+        - name: teeth
+          # overlay의 images: 블록이 이 이름을 기준으로 ECR URL + 커밋 SHA 태그로 교체한다
+          image: teeth-api:latest
+          # SHA 태그는 불변이므로 IfNotPresent로 노드 캐시 활용 (Always 불필요)
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_BUCKET
+              value: "microlens-model-weights"
+            - name: AWS_REGION
+              value: "ap-northeast-2"
+            - name: MODEL_KEY
+              value: "models/teeth/weights.pt"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "2"
+              memory: "8Gi"
+              nvidia.com/gpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+      nodeSelector:
+        node-type: gpu
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: gpu
+          effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teeth-svc
+  namespace: microlens
+spec:
+  selector:
+    app: teeth
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
