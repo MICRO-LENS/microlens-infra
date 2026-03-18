@@ -30,6 +30,7 @@
   gather_facts: true
   tags: always
 
+- import_playbook: playbooks/00-nat.yml
 - import_playbook: playbooks/01-common.yml
 - import_playbook: playbooks/02-gpu.yml
 - import_playbook: playbooks/03-master.yml

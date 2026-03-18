@@ -22,7 +22,7 @@
 #   01-common → [02-gpu] → 03-master → 04-worker → 05-addons
 # ============================================================
 - name: GPU node setup (NVIDIA Driver + Container Toolkit)
-  hosts: workers
+  hosts: gpu_workers
   become: true
   tags: gpu
 

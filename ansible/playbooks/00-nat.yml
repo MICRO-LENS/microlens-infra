@@ -1,0 +1,86 @@
+---
+# ============================================================
+# 플레이북: 00-nat.yml
+# 대상: bastion 그룹 (NAT 인스턴스)
+# 레이어: 인프라 레이어 - NAT 인스턴스 OS 설정
+#
+# 목적:
+#   프라이빗 서브넷 노드들의 아웃바운드 인터넷 트래픽을 NAT 인스턴스가
+#   안정적으로 포워딩하도록 ip_forward와 iptables MASQUERADE를 설정한다.
+#
+# user_data 대신 이 플레이북을 사용하는 이유:
+#   user_data는 인스턴스 최초 생성 시 한 번만 실행되며,
+#   terraform apply로 재생성 시 재실행되나 apt 실패 등으로 중단될 수 있다.
+#   Ansible은 멱등성이 보장되며 언제든 재실행해도 안전하다.
+#
+# 실행:
+#   ansible-playbook site.yml --tags nat
+#   ansible-playbook site.yml --tags nat --limit bastion   (NAT만 재적용)
+#
+# 실행 순서상 위치:
+#   [00-nat] → 01-common → 02-gpu → 03-master → 04-worker → 05-addons
+# ============================================================
+- name: Configure NAT instance
+  hosts: bastion
+  become: true
+  tags: nat
+
+  tasks:
+    # ── ip_forward 영구 활성화 ──────────────────────────────
+    # sysctl.d 파일 방식: systemd-sysctl.service가 부팅 시 로드.
+    # /etc/sysctl.d/99-sysctl.conf(→/etc/sysctl.conf 심링크)보다
+    # 먼저 로드되지 않도록 파일명을 60-으로 지정한다(알파벳 순서상 앞에 위치).
+    - name: Enable ip_forward permanently (sysctl.d)
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        state: present
+        sysctl_file: /etc/sysctl.d/60-nat-forwarding.conf
+        reload: true
+
+    # ── iptables MASQUERADE ─────────────────────────────────
+    # 프라이빗 서브넷(10.0.0.0/8)에서 오는 패킷을 NAT 인스턴스 IP로 변환.
+    # ens5: Nitro 기반 인스턴스(t3.nano)의 기본 인터페이스명.
+    # -C로 규칙 존재 여부를 확인하므로 중복 추가되지 않는다.
+    - name: Add iptables MASQUERADE rule
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        out_interface: ens5
+        jump: MASQUERADE
+        state: present
+
+    # ── systemd 서비스로 부팅 시 재적용 보장 ────────────────
+    # sysctl.d 로딩 순서나 cloud-init 등의 간섭으로 ip_forward가 리셋될 경우를
+    # 대비한 2중 보장. network.target 이후 실행되어 설정을 강제 적용한다.
+    - name: Install nat-setup systemd service
+      copy:
+        dest: /etc/systemd/system/nat-setup.service
+        content: |
+          [Unit]
+          Description=NAT ip_forward and iptables MASQUERADE
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/sbin/sysctl -w net.ipv4.ip_forward=1
+          ExecStart=/bin/sh -c 'iptables -t nat -C POSTROUTING -o ens5 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o ens5 -j MASQUERADE'
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+
+    - name: Enable and start nat-setup service
+      systemd:
+        name: nat-setup
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # ── 현재 상태 검증 ──────────────────────────────────────
+    - name: Verify ip_forward is 1
+      command: sysctl net.ipv4.ip_forward
+      register: ip_forward_result
+      changed_when: false
+      failed_when: "'net.ipv4.ip_forward = 1' not in ip_forward_result.stdout"
