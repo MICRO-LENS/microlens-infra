@@ -18,13 +18,20 @@
   tags: common
 
   handlers:
-    # containerd 설정 변경 시 자동으로 재시작하기 위한 핸들러
-    # notify: restart containerd 를 통해 호출됨
     - name: restart containerd
       systemd:
         name: containerd
         state: restarted
         daemon_reload: true
+
+    # ECR credential provider args 변경 후 kubelet 재시작
+    # 클러스터 합류 전 노드는 kubelet이 대기 상태이므로 failed_when: false
+    - name: restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted
+        daemon_reload: true
+      failed_when: false
 
   tasks:
     # ── 스왑 비활성화 ──────────────────────────────────────
@@ -187,3 +194,55 @@
         name: kubelet
         enabled: true
         state: started
+
+    # ── ECR Credential Provider ────────────────────────────
+    # kubeadm 클러스터는 EKS와 달리 ECR 인증이 자동 연동되지 않는다.
+    # ecr-credential-provider는 kubelet의 credential provider 플러그인으로,
+    # 노드 IAM Role을 통해 ECR 토큰을 자동 발급·갱신한다.
+    # (ECR 토큰은 12시간 유효 → defaultCacheDuration: 12h)
+    #
+    # 동작 원리:
+    #   kubelet이 ECR 이미지를 pull할 때 --image-credential-provider-bin-dir의
+    #   ecr-credential-provider 바이너리를 호출하고,
+    #   바이너리가 IMDSv2(인스턴스 메타데이터)로 IAM Role 자격증명을 조회해
+    #   ECR 토큰을 발급하여 kubelet에 반환한다.
+    # 바이너리 URL: group_vars/all.yml의 ecr_credential_provider_url 변수로 관리.
+    # https://storage.googleapis.com/k8s-artifacts-prod 에서 버전 확인 후 직접 입력.
+    - name: Download ecr-credential-provider binary
+      get_url:
+        url: "{{ ecr_credential_provider_url }}"
+        dest: /usr/local/bin/ecr-credential-provider
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Create ECR credential provider config directory
+      file:
+        path: /etc/ecr-credential-provider
+        state: directory
+        mode: "0755"
+
+    - name: Create ECR credential provider config
+      copy:
+        dest: /etc/ecr-credential-provider/config.yaml
+        content: |
+          apiVersion: kubelet.config.k8s.io/v1
+          kind: CredentialProviderConfig
+          providers:
+            - name: ecr-credential-provider
+              matchImages:
+                - "*.dkr.ecr.*.amazonaws.com"
+              defaultCacheDuration: "12h"
+              apiVersion: credentialprovider.kubelet.k8s.io/v1
+        mode: "0644"
+
+    # /etc/default/kubelet: kubeadm drop-in(10-kubeadm.conf)이 명시적으로
+    # EnvironmentFile로 로드하는 사용자 override 파일.
+    # 여기에 KUBELET_EXTRA_ARGS를 설정하면 kubelet 시작 시 자동 반영된다.
+    - name: Configure kubelet to use ECR credential provider
+      copy:
+        dest: /etc/default/kubelet
+        content: |
+          KUBELET_EXTRA_ARGS="--image-credential-provider-config=/etc/ecr-credential-provider/config.yaml --image-credential-provider-bin-dir=/usr/local/bin"
+        mode: "0644"
+      notify: restart kubelet
