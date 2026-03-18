@@ -1,154 +1,37 @@
 ---
 # ============================================================
 # 플레이북: 06-deploy-k8s.yml
-# 목적: K8s 매니페스트(Jinja2 템플릿)를 렌더링하여 클러스터에 배포
-# 실행 대상: masters (kubectl이 설치된 Control Plane 노드)
+# 상태: ⚠️  DEPRECATED — ArgoCD 도입으로 역할 종료
 #
-# 이 플레이북이 필요한 이유:
-#   k8s/*.yaml 파일은 {{ aws_account_id }}, {{ nat_ip }} 같은 Jinja2 변수를 포함.
-#   kubectl apply -f k8s/ 로 직접 적용하면 변수가 치환되지 않아 오류 발생.
-#   Ansible template 모듈이 변수를 치환한 뒤 kubectl apply 하는 방식으로 해결.
+# 이전 역할:
+#   k8s/*.yaml (Jinja2 템플릿)을 렌더링하여 kubectl apply로 직접 배포.
+#   aws_account_id, nat_ip 변수를 IMDS에서 동적 획득하여 이미지 태그 주입.
 #
-# 변수 획득 방법:
-#   aws_account_id: aws sts get-caller-identity 로 동적 획득 (하드코딩 금지)
-#   nat_ip: hostvars['nat']['ansible_host'] (hosts.ini [bastion] 섹션의 ansible_host)
+# 변경 이유:
+#   Kustomize 전환으로 k8s/base/, k8s/overlays/ 구조가 도입되어
+#   Jinja2 변수가 제거됐고, 이미지 태그는 kustomization.yaml의 images: 블록으로 관리.
+#   ArgoCD가 microlens-infra 레포를 감시하여 클러스터에 자동 동기화하므로
+#   Ansible이 직접 kubectl apply를 실행할 필요가 없어짐.
+#   직접 kubectl apply를 실행하면 ArgoCD의 selfHeal이 원래 상태로 되돌려
+#   충돌이 발생함.
 #
-# 배포 단계:
-#   Phase 1 (CPU only):  --tags deploy-cpu  (t3.medium 검증 단계)
-#   Phase 2 (GPU 포함):  --tags deploy-gpu  (g4dn 쿼타 승인 후)
+# 현재 배포 흐름:
+#   Jenkins → kustomize edit set image → git push (microlens-infra)
+#     → ArgoCD 변경 감지 → kubectl apply -k k8s/overlays/phase2
+#
+# 이 플레이북은 site.yml에서 제거해도 무방하나,
+# 이력 보존 목적으로 파일만 유지함.
 # ============================================================
-
-- name: K8s 매니페스트 렌더링 및 배포
+- name: "[DEPRECATED] 06-deploy-k8s — ArgoCD로 대체됨"
   hosts: masters
+  gather_facts: false
   tags: [k8s-deploy]
 
-  pre_tasks:
-    # ── AWS Account ID 동적 획득 ──────────────────────────────
-    # EC2 인스턴스 메타데이터(IMDSv2)에서 Account ID를 획득.
-    # AWS CLI 없이도 동작하며, Instance Profile이 부여된 노드라면 항상 사용 가능.
-    - name: IMDSv2 토큰 획득
-      ansible.builtin.uri:
-        url: http://169.254.169.254/latest/api/token
-        method: PUT
-        headers:
-          X-aws-ec2-metadata-token-ttl-seconds: "21600"
-        return_content: true
-      register: imds_token
-      changed_when: false
-
-    - name: AWS Account ID 조회 (인스턴스 메타데이터)
-      ansible.builtin.uri:
-        url: http://169.254.169.254/latest/dynamic/instance-identity/document
-        method: GET
-        headers:
-          X-aws-ec2-metadata-token: "{{ imds_token.content }}"
-        return_content: true
-      register: identity_doc
-      changed_when: false
-
-    # 조회된 Account ID를 플레이 전체에서 사용할 변수로 등록
-    - name: aws_account_id 변수 설정
-      ansible.builtin.set_fact:
-        aws_account_id: "{{ (identity_doc.content | from_json).accountId }}"
-
-    # ── NAT 퍼블릭 IP 설정 ───────────────────────────────────
-    # hosts.ini [bastion] 섹션의 ansible_host 값을 그대로 사용.
-    # 이 값은 terraform output nat_public_ip 로 채운 NAT 인스턴스 공인 IP.
-    # Ingress host 필드와 Android 앱의 API 엔드포인트가 이 IP를 사용한다.
-    - name: nat_ip 변수 설정
-      ansible.builtin.set_fact:
-        nat_ip: "{{ hostvars['nat']['ansible_host'] }}"
-
-    - name: 변수 확인 (디버그)
+  tasks:
+    - name: 역할 종료 안내
       ansible.builtin.debug:
         msg:
-          - "aws_account_id: {{ aws_account_id }}"
-          - "nat_ip: {{ nat_ip }}"
-
-  tasks:
-    # ── 렌더링 디렉토리 준비 ──────────────────────────────────
-    # template 모듈의 출력 파일을 저장할 임시 디렉토리 생성.
-    # /tmp/k8s-rendered/: 플레이북 실행마다 최신 렌더링 결과가 덮어쓰여진다.
-    - name: 렌더링 결과 저장 디렉토리 생성
-      ansible.builtin.file:
-        path: /tmp/k8s-rendered
-        state: directory
-        mode: "0755"
-
-    # ── Jinja2 템플릿 렌더링 ─────────────────────────────────
-    # src: 로컬(Ansible 컨트롤러)의 k8s/ 디렉토리 내 각 파일
-    # dest: 마스터 노드의 /tmp/k8s-rendered/ 에 복사 (변수 치환 완료 상태)
-    # {{ aws_account_id }}, {{ nat_ip }} 가 실제 값으로 대체된 순수 YAML 생성
-
-    # ── 00. Namespace & ServiceAccount (공통, 항상 배포) ─────
-    - name: "00-namespace.yaml 렌더링"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../k8s/00-namespace.yaml"
-        dest: /tmp/k8s-rendered/00-namespace.yaml
-
-    - name: "00-serviceaccount.yaml 렌더링"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../k8s/00-serviceaccount.yaml"
-        dest: /tmp/k8s-rendered/00-serviceaccount.yaml
-
-    # ── 02. CPU 서비스 (Phase 1, 항상 배포) ──────────────────
-    - name: "02-stain-classification.yaml 렌더링"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../k8s/02-stain-classification.yaml"
-        dest: /tmp/k8s-rendered/02-stain-classification.yaml
-
-    # ── 04. Ingress (공통, 항상 배포) ────────────────────────
-    - name: "04-ingress.yaml 렌더링"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../k8s/04-ingress.yaml"
-        dest: /tmp/k8s-rendered/04-ingress.yaml
-
-    # ── 05. HPA (공통, 항상 배포) ─────────────────────────────
-    - name: "05-hpa.yaml 렌더링"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../k8s/05-hpa.yaml"
-        dest: /tmp/k8s-rendered/05-hpa.yaml
-
-    # ── 01/03. GPU 서비스 (Phase 2, gpu_enabled: true 일 때만) ─
-    # gpu_enabled: false 상태에서 렌더링하면 GPU Pod가 배포되어
-    # 노드에 GPU가 없을 경우 Pending 상태로 클러스터 자원을 점유한다.
-    - name: "01-stain-detection.yaml 렌더링 (GPU)"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../k8s/01-stain-detection.yaml"
-        dest: /tmp/k8s-rendered/01-stain-detection.yaml
-      when: gpu_enabled | bool
-
-    - name: "03-teeth.yaml 렌더링 (GPU)"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../k8s/03-teeth.yaml"
-        dest: /tmp/k8s-rendered/03-teeth.yaml
-      when: gpu_enabled | bool
-
-    # ── Nginx Ingress Controller 준비 대기 ───────────────────
-    # admission webhook이 등록된 상태에서 컨트롤러 Pod가 Ready가 아니면
-    # Ingress apply 시 connection refused 오류가 발생한다.
-    - name: Nginx Ingress Controller Ready 대기
-      ansible.builtin.command: >
-        kubectl wait --namespace ingress-nginx
-        --for=condition=ready pod
-        --selector=app.kubernetes.io/component=controller
-        --timeout=120s
-      environment:
-        KUBECONFIG: /home/ubuntu/.kube/config
-      changed_when: false
-
-    # ── kubectl apply ─────────────────────────────────────────
-    # 렌더링 완료된 순수 YAML 파일을 클러스터에 적용.
-    # KUBECONFIG를 명시적으로 지정해야 ubuntu 계정의 kubeconfig를 사용할 수 있다.
-    # (root와 ubuntu 모두 kubeconfig가 설정되어 있지만 sudo 없이 실행하므로)
-    - name: K8s 리소스 배포 (kubectl apply)
-      ansible.builtin.command: >
-        kubectl apply -f /tmp/k8s-rendered/
-      environment:
-        KUBECONFIG: /home/ubuntu/.kube/config
-      register: kubectl_result
-      changed_when: "'configured' in kubectl_result.stdout or 'created' in kubectl_result.stdout"
-
-    - name: kubectl apply 결과 출력
-      ansible.builtin.debug:
-        var: kubectl_result.stdout_lines
+          - "이 플레이북은 ArgoCD 도입으로 더 이상 사용되지 않습니다."
+          - "배포는 ArgoCD가 microlens-infra 레포를 감시하여 자동 처리합니다."
+          - "이미지 태그 갱신: Jenkins → kustomize edit set image → git push"
+          - "ArgoCD 상태 확인: kubectl get applications -n argocd"
