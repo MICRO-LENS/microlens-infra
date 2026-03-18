@@ -4,10 +4,10 @@ kind: Kustomization
 # Phase 2: g4dn.xlarge GPU 워커 노드 투입 후 전체 서비스 배포
 # base(CPU) + GPU 서비스(stain-detection, teeth) + GPU HPA 추가
 resources:
-  - ../../base
-  - 01-stain-detection.yaml
-  - 03-teeth.yaml
-  - 05-hpa-gpu.yaml
+- ../../base
+- 01-stain-detection.yaml
+- 03-teeth.yaml
+- 05-hpa-gpu.yaml
 
 # Jenkins CI가 빌드 완료 후 아래 newTag를 커밋 SHA로 갱신:
 #   kustomize edit set image \
@@ -15,12 +15,12 @@ resources:
 #     stain-classification-api=<ECR_URL>/stain-classification-api:<SHA> \
 #     teeth-api=<ECR_URL>/teeth-api:<SHA>
 images:
-  - name: stain-detection-api
-    newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
-    newTag: "latest"
-  - name: stain-classification-api
-    newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
-    newTag: "latest"
-  - name: teeth-api
-    newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
-    newTag: "latest"
+- name: stain-classification-api
+  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
+  newTag: 56b8e60
+- name: stain-detection-api
+  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
+  newTag: 56b8e60
+- name: teeth-api
+  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
+  newTag: 56b8e60
