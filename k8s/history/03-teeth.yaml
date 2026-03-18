@@ -1,0 +1,90 @@
+# ============================================================
+# 파일: 03-teeth.yaml
+# 목적: 치아 분석 AI 서비스 배포 및 클러스터 내부 노출
+# 리소스: Deployment + Service (ClusterIP)
+#
+# GPU 사용 여부: ✅ nvidia.com/gpu: 1 (NVIDIA T4 필요)
+# 배포 단계: Phase 2 (g4dn 쿼타 승인 후) - make deploy-gpu
+#
+# ✏️  배포 전 필수 수정:
+#   image 필드의 <AWS_ACCOUNT_ID>를 실제 AWS 계정 ID로 교체
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teeth
+  namespace: microlens
+  labels:
+    app: teeth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: teeth
+  template:
+    metadata:
+      labels:
+        app: teeth
+    spec:
+      serviceAccountName: microlens-sa
+      containers:
+        - name: teeth
+          # aws_account_id: Ansible 06-deploy-k8s.yml이 aws sts get-caller-identity로 자동 주입
+          image: {{ aws_account_id }}.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_BUCKET
+              value: "microlens-model-weights"
+            - name: AWS_REGION
+              value: "ap-northeast-2"
+            - name: MODEL_KEY
+              value: "models/teeth/weights.pt"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "2"
+              memory: "8Gi"
+              nvidia.com/gpu: "1"
+          # GPU 모델 초기화 시간을 고려해 initialDelaySeconds를 넉넉하게 설정
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+      # nodeSelector: node-type=gpu 라벨이 있는 GPU 노드(g4dn.xlarge)에만 배치된다.
+      nodeSelector:
+        node-type: gpu
+      # tolerations: 01-stain-detection.yaml과 동일한 전략.
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: gpu
+          effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teeth-svc
+  namespace: microlens
+spec:
+  selector:
+    app: teeth
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
