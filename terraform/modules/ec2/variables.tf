@@ -44,7 +44,7 @@ variable "jenkins_webhook_allowed_cidrs" {
 variable "worker_instance_type" {
   type        = string
   description = "Worker node instance type. t3.medium for validation, g4dn.xlarge for GPU production."
-  default     = "t3.medium"
+  default     = "g4dn.xlarge"
 }
 
 variable "worker_count" {
