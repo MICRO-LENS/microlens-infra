@@ -166,7 +166,8 @@ GPU 서비스 Pod (stain-detection, teeth)
 
 ```bash
 # group_vars/all.yml: gpu_enabled: false
-ansible-playbook ansible/site.yml
+cd ansible
+ansible-playbook site.yml
 make deploy-cpu   # stain-classification(CPU)만 배포
 ```
 
