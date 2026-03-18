@@ -85,11 +85,17 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 10
             failureThreshold: 3
-      # nodeSelector: node-type=gpu 라벨이 있는 노드(g4dn.xlarge)에만 배치된다.
-      # nvidia.com/gpu: 1 resource limit과 함께 사용하여 GPU 노드 스케줄링을 이중으로 보장한다.
-      # Taint/Toleration 대신 Label/NodeSelector를 사용하므로 시스템 Pod들은 영향받지 않는다.
+      # nodeSelector: node-type=gpu 라벨이 있는 GPU 노드(g4dn.xlarge)에만 배치된다.
       nodeSelector:
         node-type: gpu
+      # tolerations: GPU 노드의 Taint(dedicated=gpu:NoSchedule)를 허용한다.
+      # 이 Toleration이 없는 Pod(시스템 Pod, stain-classification)는
+      # GPU 노드에 스케줄되지 않아 CPU 워커 노드로 자연스럽게 분리된다.
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: gpu
+          effect: NoSchedule
 ---
 # ============================================================
 # Service (ClusterIP)

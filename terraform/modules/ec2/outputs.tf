@@ -6,6 +6,10 @@ output "worker_instance_ids" {
   value = aws_instance.worker[*].id
 }
 
+output "cpu_worker_instance_ids" {
+  value = aws_instance.cpu_worker[*].id
+}
+
 output "jenkins_instance_id" {
   value = aws_instance.jenkins.id
 }

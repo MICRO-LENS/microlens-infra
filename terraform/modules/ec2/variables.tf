@@ -49,6 +49,18 @@ variable "worker_instance_type" {
 
 variable "worker_count" {
   type        = number
-  description = "Number of worker nodes. Set 0 while waiting for G-instance vCPU quota approval."
+  description = "Number of GPU worker nodes. Set 0 while waiting for G-instance vCPU quota approval."
   default     = 2
+}
+
+variable "cpu_worker_count" {
+  type        = number
+  description = "Number of CPU-only worker nodes for system pods and CPU services (stain-classification)."
+  default     = 1
+}
+
+variable "cpu_worker_instance_type" {
+  type        = string
+  description = "CPU worker node instance type. t3.large (2 vCPU, 8GiB) covers system pods + stain-classification limits."
+  default     = "t3.large"
 }

@@ -55,41 +55,34 @@
         kubectl apply -f
         https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/baremetal/deploy.yaml
 
-    # ── 기존 GPU Taint 제거 ─────────────────────────────────
-    # Taint 전략에서 Label/NodeSelector 전략으로 전환하면서
-    # 이전에 걸린 dedicated=gpu:NoSchedule taint를 제거한다.
-    # taint가 없는 노드에 실행하면 오류가 나므로 ignore_errors로 멱등성 보장.
-    - name: Remove GPU taint from worker nodes (if exists)
+    # ── GPU 워커 노드 라벨 + Taint ──────────────────────────
+    # 전략: CPU 워커 노드가 추가되었으므로 Taint 전략을 적용한다.
+    #
+    # GPU 노드에 Taint(dedicated=gpu:NoSchedule)를 걸고
+    # GPU 서비스 Pod(stain-detection, teeth)에만 Toleration을 추가한다.
+    # 시스템 Pod(ingress-nginx, metrics-server)와 CPU 서비스(stain-classification)는
+    # Toleration이 없으므로 자동으로 CPU 워커 노드에 배치된다.
+    #
+    # 노드 식별 방법:
+    #   Ansible 인벤토리의 ansible_host(프라이빗 IP)로
+    #   kubectl get nodes -o wide의 INTERNAL-IP 컬럼을 매칭하여 노드명을 찾는다.
+    #   kubeadm 클러스터에서 노드명은 호스트명이며 IP와 1:1 매핑된다.
+    - name: Label and taint GPU worker nodes (node-type=gpu, dedicated=gpu:NoSchedule)
       shell: |
-        for node in $(kubectl get nodes \
-          --selector='!node-role.kubernetes.io/control-plane' \
-          -o jsonpath='{.items[*].metadata.name}'); do
-          kubectl taint node "$node" dedicated=gpu:NoSchedule- 2>/dev/null || true
-        done
+        node=$(kubectl get nodes -o wide | awk '$6 == "{{ hostvars[item]['ansible_host'] }}" {print $1}')
+        kubectl label node "$node" node-type=gpu --overwrite
+        kubectl taint node "$node" dedicated=gpu:NoSchedule --overwrite
+      loop: "{{ groups['gpu_workers'] }}"
       when: gpu_enabled | bool
 
-    # ── GPU 워커 노드 라벨링 ────────────────────────────────
-    # Taint 대신 Label + NodeSelector 전략을 사용한다.
-    #
-    # 이유:
-    #   nvidia.com/gpu: 1 resource limit만으로도 GPU Pod는 GPU 노드에만 배치된다.
-    #   (GPU 자원이 없는 노드에는 스케줄러가 자동으로 배치하지 않음)
-    #   Taint를 걸면 ingress-nginx, metrics-server 등 시스템 Pod까지 모두 Pending이
-    #   되어 모든 컴포넌트에 toleration을 추가해야 하는 관리 오버헤드가 생긴다.
-    #
-    # 동작 원리:
-    #   워커 노드에 node-type=gpu 라벨을 부여하고,
-    #   GPU 서비스 Pod(stain-detection, teeth)의 nodeSelector에 node-type: gpu를
-    #   명시하여 GPU 노드로 유도한다.
-    #   시스템 Pod들은 nodeSelector가 없으므로 CPU 여유가 있는 워커 노드에 자유롭게 배치된다.
-    - name: Label GPU worker nodes (node-type=gpu)
+    # ── CPU 워커 노드 라벨링 ────────────────────────────────
+    # stain-classification Pod의 nodeSelector(node-type=cpu)가
+    # 이 라벨을 보고 CPU 워커 노드에만 배치되도록 유도한다.
+    - name: Label CPU worker nodes (node-type=cpu)
       shell: |
-        for node in $(kubectl get nodes \
-          --selector='!node-role.kubernetes.io/control-plane' \
-          -o jsonpath='{.items[*].metadata.name}'); do
-          kubectl label node "$node" node-type=gpu --overwrite
-        done
-      when: gpu_enabled | bool
+        node=$(kubectl get nodes -o wide | awk '$6 == "{{ hostvars[item]['ansible_host'] }}" {print $1}')
+        kubectl label node "$node" node-type=cpu --overwrite
+      loop: "{{ groups['cpu_workers'] }}"
 
     # ── nvidia-device-plugin (GPU only) ───────────────────
     # 역할: K8s 스케줄러가 각 노드의 GPU 수를 자원으로 인식하게 만드는 DaemonSet.

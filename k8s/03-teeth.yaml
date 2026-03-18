@@ -65,10 +65,15 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 10
             failureThreshold: 3
-      # nodeSelector: 01-stain-detection.yaml과 동일한 전략.
-      # node-type=gpu 라벨 노드에만 배치되어 GPU 자원을 사용한다.
+      # nodeSelector: node-type=gpu 라벨이 있는 GPU 노드(g4dn.xlarge)에만 배치된다.
       nodeSelector:
         node-type: gpu
+      # tolerations: 01-stain-detection.yaml과 동일한 전략.
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: gpu
+          effect: NoSchedule
 ---
 apiVersion: v1
 kind: Service

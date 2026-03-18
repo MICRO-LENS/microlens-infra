@@ -116,18 +116,40 @@ resource "aws_instance" "nat" {
   # OS 레벨 NAT 설정: IP 포워딩 활성화 + iptables masquerade
   user_data = <<-EOF
     #!/bin/bash
-    set -e
+    # set -e 제거: apt-get update가 EC2 첫 부팅 시 네트워크 준비 전에 실행되면
+    # 실패하여 스크립트가 중단되고 netfilter-persistent save가 실행되지 않는다.
+    # 대신 각 단계를 독립적으로 실행하고 apt는 재시도 루프로 처리한다.
 
-    # IP forwarding 활성화 (NAT 기능) - sysctl.conf에 영구 등록 후 즉시 적용
-    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-nat.conf
-    sysctl -p /etc/sysctl.d/99-nat.conf
+    # sysctl.d 파일 방식은 Ubuntu 22.04에서 99-sysctl.conf(→/etc/sysctl.conf 심링크)가
+    # 알파벳 순 로딩에서 나중에 덮어쓸 수 있어 불안정하다.
+    # 대신 systemd 서비스로 ip_forward + iptables를 부팅마다 강제 적용한다.
+    cat > /etc/systemd/system/nat-setup.service << 'UNIT'
+    [Unit]
+    Description=NAT ip_forward and iptables MASQUERADE
+    After=network.target
 
-    # iptables MASQUERADE 규칙 (NAT) - Nitro 인스턴스는 ens5
-    iptables -t nat -A POSTROUTING -o ens5 -j MASQUERADE
+    [Service]
+    Type=oneshot
+    # ip_forward 강제 적용 (sysctl.d 로딩 순서 문제 우회)
+    ExecStart=/sbin/sysctl -w net.ipv4.ip_forward=1
+    # MASQUERADE 규칙 중복 추가 방지: -C로 존재 확인 후 없을 때만 -A로 추가
+    ExecStart=/bin/sh -c 'iptables -t nat -C POSTROUTING -o ens5 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o ens5 -j MASQUERADE'
+    RemainAfterExit=yes
 
-    # iptables-persistent: 설치 전에 DEBIAN_FRONTEND 설정으로 interactive prompt 방지
-    # debconf-set-selections로 iptables-persistent 설치 시 현재 규칙 저장 여부 응답을 자동화
-    DEBIAN_FRONTEND=noninteractive apt-get update -y
+    [Install]
+    WantedBy=multi-user.target
+    UNIT
+
+    systemctl daemon-reload
+    systemctl enable nat-setup
+    systemctl start nat-setup
+
+    # apt-get update: 첫 부팅 시 네트워크가 늦게 뜨는 경우를 대비해 재시도 루프 사용
+    for i in 1 2 3 4 5; do
+      DEBIAN_FRONTEND=noninteractive apt-get update -y && break
+      sleep $((i * 10))
+    done
+
     DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
     netfilter-persistent save
   EOF

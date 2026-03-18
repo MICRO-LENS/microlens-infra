@@ -34,6 +34,7 @@ module "ec2" {
 
   worker_instance_type = "g4dn.xlarge"
   worker_count         = 2
+  cpu_worker_count     = 1
 }
 
 output "vpc_id" {

@@ -72,8 +72,12 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
-      # nodeSelector 없음: GPU 노드 포함 어느 워커 노드든 CPU 여유가 있는 곳에 자유롭게 배치된다.
-      # Taint를 사용하지 않으므로 toleration도 필요 없다.
+      # nodeSelector: node-type=cpu 라벨이 있는 CPU 워커 노드(t3.large)에만 배치된다.
+      # GPU 노드에는 Taint(dedicated=gpu:NoSchedule)가 걸려 있어
+      # Toleration 없는 이 Pod는 GPU 노드에 스케줄될 수 없다.
+      # nodeSelector를 추가로 명시하여 CPU 워커 노드 배치를 확정적으로 보장한다.
+      nodeSelector:
+        node-type: cpu
 ---
 apiVersion: v1
 kind: Service
