@@ -254,6 +254,7 @@ make deploy-gpu   # Phase 2: 전체 서비스
 ---
 
 ## 클러스터 상태 확인
+kubectl 은 클러스터 전체를 API Server를 통해 조회하기 때문에, Control Plane 한 곳에서 모든 노드/Pod 상태를 볼 수 있습니다.
 
 ### 노드 상태
 

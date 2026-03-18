@@ -41,6 +41,15 @@
         kubectl apply -f
         https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
 
+    # kubeadm 클러스터는 kubelet이 자체 서명 인증서를 사용하므로
+    # metrics-server가 kubelet API 접근 시 인증서 검증에 실패한다.
+    # --kubelet-insecure-tls 플래그로 검증을 건너뛰어야 kubectl top이 동작한다.
+    - name: Patch Metrics Server to skip kubelet TLS verification
+      command: >
+        kubectl patch deployment metrics-server -n kube-system
+        --type=json
+        -p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]
+
     # ── Nginx Ingress Controller ───────────────────────────
     # 외부 트래픽의 단일 진입점으로, L7(HTTP) 경로 기반 라우팅을 담당한다.
     # /stain/detect, /stain/classify, /teeth/check 경로를
@@ -67,10 +76,11 @@
     #   Ansible 인벤토리의 ansible_host(프라이빗 IP)로
     #   kubectl get nodes -o wide의 INTERNAL-IP 컬럼을 매칭하여 노드명을 찾는다.
     #   kubeadm 클러스터에서 노드명은 호스트명이며 IP와 1:1 매핑된다.
-    - name: Label and taint GPU worker nodes (node-type=gpu, dedicated=gpu:NoSchedule)
+    - name: Label and taint GPU worker nodes (node-type=gpu, role=gpu-worker, dedicated=gpu:NoSchedule)
       shell: |
         node=$(kubectl get nodes -o wide | awk '$6 == "{{ hostvars[item]['ansible_host'] }}" {print $1}')
         kubectl label node "$node" node-type=gpu --overwrite
+        kubectl label node "$node" node-role.kubernetes.io/gpu-worker= --overwrite
         kubectl taint node "$node" dedicated=gpu:NoSchedule --overwrite
       loop: "{{ groups['gpu_workers'] }}"
       when: gpu_enabled | bool
@@ -78,10 +88,11 @@
     # ── CPU 워커 노드 라벨링 ────────────────────────────────
     # stain-classification Pod의 nodeSelector(node-type=cpu)가
     # 이 라벨을 보고 CPU 워커 노드에만 배치되도록 유도한다.
-    - name: Label CPU worker nodes (node-type=cpu)
+    - name: Label CPU worker nodes (node-type=cpu, role=cpu-worker)
       shell: |
         node=$(kubectl get nodes -o wide | awk '$6 == "{{ hostvars[item]['ansible_host'] }}" {print $1}')
         kubectl label node "$node" node-type=cpu --overwrite
+        kubectl label node "$node" node-role.kubernetes.io/cpu-worker= --overwrite
       loop: "{{ groups['cpu_workers'] }}"
 
     # ── nvidia-device-plugin (GPU only) ───────────────────
