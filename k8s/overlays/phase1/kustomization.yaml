@@ -11,5 +11,5 @@ resources:
 #   kustomize edit set image stain-classification-api=<ECR_URL>/stain-classification-api:<SHA>
 images:
   - name: stain-classification-api
-    newName: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
+    newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
     newTag: "latest"

@@ -16,11 +16,11 @@ resources:
 #     teeth-api=<ECR_URL>/teeth-api:<SHA>
 images:
   - name: stain-detection-api
-    newName: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
+    newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
     newTag: "latest"
   - name: stain-classification-api
-    newName: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
+    newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
     newTag: "latest"
   - name: teeth-api
-    newName: <ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
+    newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
     newTag: "latest"
