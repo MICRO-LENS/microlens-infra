@@ -55,6 +55,42 @@
         kubectl apply -f
         https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/baremetal/deploy.yaml
 
+    # ── 기존 GPU Taint 제거 ─────────────────────────────────
+    # Taint 전략에서 Label/NodeSelector 전략으로 전환하면서
+    # 이전에 걸린 dedicated=gpu:NoSchedule taint를 제거한다.
+    # taint가 없는 노드에 실행하면 오류가 나므로 ignore_errors로 멱등성 보장.
+    - name: Remove GPU taint from worker nodes (if exists)
+      shell: |
+        for node in $(kubectl get nodes \
+          --selector='!node-role.kubernetes.io/control-plane' \
+          -o jsonpath='{.items[*].metadata.name}'); do
+          kubectl taint node "$node" dedicated=gpu:NoSchedule- 2>/dev/null || true
+        done
+      when: gpu_enabled | bool
+
+    # ── GPU 워커 노드 라벨링 ────────────────────────────────
+    # Taint 대신 Label + NodeSelector 전략을 사용한다.
+    #
+    # 이유:
+    #   nvidia.com/gpu: 1 resource limit만으로도 GPU Pod는 GPU 노드에만 배치된다.
+    #   (GPU 자원이 없는 노드에는 스케줄러가 자동으로 배치하지 않음)
+    #   Taint를 걸면 ingress-nginx, metrics-server 등 시스템 Pod까지 모두 Pending이
+    #   되어 모든 컴포넌트에 toleration을 추가해야 하는 관리 오버헤드가 생긴다.
+    #
+    # 동작 원리:
+    #   워커 노드에 node-type=gpu 라벨을 부여하고,
+    #   GPU 서비스 Pod(stain-detection, teeth)의 nodeSelector에 node-type: gpu를
+    #   명시하여 GPU 노드로 유도한다.
+    #   시스템 Pod들은 nodeSelector가 없으므로 CPU 여유가 있는 워커 노드에 자유롭게 배치된다.
+    - name: Label GPU worker nodes (node-type=gpu)
+      shell: |
+        for node in $(kubectl get nodes \
+          --selector='!node-role.kubernetes.io/control-plane' \
+          -o jsonpath='{.items[*].metadata.name}'); do
+          kubectl label node "$node" node-type=gpu --overwrite
+        done
+      when: gpu_enabled | bool
+
     # ── nvidia-device-plugin (GPU only) ───────────────────
     # 역할: K8s 스케줄러가 각 노드의 GPU 수를 자원으로 인식하게 만드는 DaemonSet.
     #       이것이 없으면 Pod spec에 nvidia.com/gpu: 1을 선언해도
@@ -71,31 +107,4 @@
       command: >
         kubectl apply -f
         https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml
-      when: gpu_enabled | bool
-
-    # ── GPU 노드 Taint ─────────────────────────────────────
-    # 목적: g4dn.xlarge는 시간당 비용이 높으므로 GPU가 꼭 필요한
-    #       AI 추론 Pod만 이 노드에 배치되도록 강제한다.
-    #
-    # 동작 원리:
-    #   Taint(dedicated=gpu:NoSchedule)를 걸면 이 키를 Toleration으로
-    #   명시한 Pod만 스케줄링이 허용된다. Jenkins 빌드 Pod나 일반 시스템 Pod는
-    #   Toleration이 없으므로 GPU 노드를 점유하지 못한다.
-    #
-    #   AI 서비스 Pod(stain-detection, teeth)의 k8s 매니페스트에는
-    #   아래 Toleration이 이미 설정되어 있어 GPU 노드에만 배치된다:
-    #     tolerations:
-    #       - key: "dedicated"
-    #         operator: "Equal"
-    #         value: "gpu"
-    #         effect: "NoSchedule"
-    #
-    # Control Plane은 node-role.kubernetes.io/control-plane 레이블로 제외한다.
-    - name: Taint GPU worker nodes (dedicated=gpu:NoSchedule)
-      shell: |
-        for node in $(kubectl get nodes \
-          --selector='!node-role.kubernetes.io/control-plane' \
-          -o jsonpath='{.items[*].metadata.name}'); do
-          kubectl taint node "$node" dedicated=gpu:NoSchedule --overwrite
-        done
       when: gpu_enabled | bool

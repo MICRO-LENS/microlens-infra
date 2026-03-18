@@ -24,23 +24,32 @@
 
   pre_tasks:
     # ── AWS Account ID 동적 획득 ──────────────────────────────
-    # aws sts get-caller-identity: 현재 IAM 자격증명의 계정 정보를 반환.
-    # EC2 Instance Profile(microlens-node-role)이 부여되어 있으므로
-    # 별도 자격증명 설정 없이도 실행 가능.
-    # query: 응답 JSON에서 Account 필드만 추출 (예: "399095820932")
-    - name: AWS Account ID 조회
-      ansible.builtin.command: >
-        aws sts get-caller-identity
-        --query Account
-        --output text
-        --region ap-northeast-2
-      register: sts_result
+    # EC2 인스턴스 메타데이터(IMDSv2)에서 Account ID를 획득.
+    # AWS CLI 없이도 동작하며, Instance Profile이 부여된 노드라면 항상 사용 가능.
+    - name: IMDSv2 토큰 획득
+      ansible.builtin.uri:
+        url: http://169.254.169.254/latest/api/token
+        method: PUT
+        headers:
+          X-aws-ec2-metadata-token-ttl-seconds: "21600"
+        return_content: true
+      register: imds_token
+      changed_when: false
+
+    - name: AWS Account ID 조회 (인스턴스 메타데이터)
+      ansible.builtin.uri:
+        url: http://169.254.169.254/latest/dynamic/instance-identity/document
+        method: GET
+        headers:
+          X-aws-ec2-metadata-token: "{{ imds_token.content }}"
+        return_content: true
+      register: identity_doc
       changed_when: false
 
     # 조회된 Account ID를 플레이 전체에서 사용할 변수로 등록
     - name: aws_account_id 변수 설정
       ansible.builtin.set_fact:
-        aws_account_id: "{{ sts_result.stdout | trim }}"
+        aws_account_id: "{{ (identity_doc.content | from_json).accountId }}"
 
     # ── NAT 퍼블릭 IP 설정 ───────────────────────────────────
     # hosts.ini [bastion] 섹션의 ansible_host 값을 그대로 사용.
@@ -114,6 +123,19 @@
         src: "{{ playbook_dir }}/../../k8s/03-teeth.yaml"
         dest: /tmp/k8s-rendered/03-teeth.yaml
       when: gpu_enabled | bool
+
+    # ── Nginx Ingress Controller 준비 대기 ───────────────────
+    # admission webhook이 등록된 상태에서 컨트롤러 Pod가 Ready가 아니면
+    # Ingress apply 시 connection refused 오류가 발생한다.
+    - name: Nginx Ingress Controller Ready 대기
+      ansible.builtin.command: >
+        kubectl wait --namespace ingress-nginx
+        --for=condition=ready pod
+        --selector=app.kubernetes.io/component=controller
+        --timeout=120s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      changed_when: false
 
     # ── kubectl apply ─────────────────────────────────────────
     # 렌더링 완료된 순수 YAML 파일을 클러스터에 적용.

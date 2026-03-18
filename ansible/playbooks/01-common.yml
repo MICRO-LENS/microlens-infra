@@ -130,8 +130,6 @@
 
     - name: Generate default containerd config
       shell: containerd config default > /etc/containerd/config.toml
-      args:
-        creates: /etc/containerd/config.toml
 
     # SystemdCgroup = true 설정의 이유:
     #   kubelet과 containerd가 각각 cgroup을 관리할 때 방식을 일치시켜야 한다.
@@ -165,8 +163,7 @@
       copy:
         dest: /etc/apt/sources.list.d/kubernetes.list
         content: |
-          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
-          https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /
 
     - name: Install kubelet, kubeadm, kubectl (버전 고정)
       apt:
