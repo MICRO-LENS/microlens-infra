@@ -1,0 +1,35 @@
+# ============================================================
+# 파일: argocd/application.yaml
+# 목적: ArgoCD가 microlens-infra 레포를 감시하고 K8s 클러스터에 자동 동기화
+#
+# Jinja2 변수 (Ansible 08-argocd.yml이 렌더링):
+#   argocd_repo_url  : microlens-infra GitHub 레포 URL
+#   argocd_overlay   : 배포 단계 (phase1 | phase2)
+#
+# 동작 흐름:
+#   Jenkins → kustomize edit set image → git push → ArgoCD 감지 → kubectl apply -k
+#
+# syncPolicy.automated:
+#   prune:     true  → 레포에서 삭제된 리소스는 클러스터에서도 제거
+#   selfHeal:  true  → kubectl로 수동 변경 시 레포 상태로 자동 복구
+# ============================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: microlens
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: {{ argocd_repo_url }}
+    targetRevision: HEAD
+    path: k8s/overlays/{{ argocd_overlay }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: microlens
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

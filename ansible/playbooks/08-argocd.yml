@@ -1,0 +1,123 @@
+---
+# ============================================================
+# 플레이북: 08-argocd.yml
+# 대상: masters (kubectl이 설치된 Control Plane 노드)
+# 레이어: GitOps 레이어 - ArgoCD 설치 및 microlens Application 등록
+#
+# 목적:
+#   GitOps 컨트롤러인 ArgoCD를 K8s 클러스터에 설치하고,
+#   microlens-infra 레포의 k8s/overlays/{{ argocd_overlay }} 경로를
+#   감시하여 클러스터에 자동 동기화하는 Application을 등록한다.
+#
+# 전제 조건:
+#   - 03-master.yml, 04-worker.yml, 05-addons.yml 완료 (클러스터 준비 상태)
+#   - argocd_repo_url 변수에 실제 GitHub 레포 URL 설정 필요
+#   - 프라이빗 레포인 경우: ArgoCD UI에서 repo 자격증명 별도 등록 필요
+#     (Settings → Repositories → Connect Repo)
+#
+# 배포 단계 전환:
+#   Phase 1 → Phase 2 전환 시 argocd_overlay 값을 변경하고 재실행:
+#   ansible-playbook site.yml --tags argocd -e argocd_overlay=phase2
+#
+# 실행:
+#   ansible-playbook site.yml --tags argocd
+#   ansible-playbook playbooks/08-argocd.yml --tags argocd
+# ============================================================
+- name: Install ArgoCD and register microlens Application
+  hosts: masters
+  become: false
+  tags: argocd
+
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+  vars:
+    argocd_repo_url: "https://github.com/MICRO-LENS/microlens-infra.git"
+    # phase1: CPU only 검증 / phase2: GPU 포함 전체 배포
+    argocd_overlay: "phase2"
+
+  tasks:
+    # ── ArgoCD 네임스페이스 생성 ──────────────────────────────
+    # --dry-run=client | kubectl apply 패턴: 이미 존재해도 오류가 발생하지 않는다.
+    - name: Create argocd namespace (idempotent)
+      shell: |
+        kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: false
+
+    # ── ArgoCD 공식 매니페스트 설치 ──────────────────────────
+    # stable 태그: 최신 릴리스를 자동으로 가리킨다.
+    # 특정 버전 고정이 필요하다면 stable → v2.x.y 로 교체.
+    #
+    # --server-side 를 사용하는 이유:
+    #   ArgoCD CRD(applicationsets.argoproj.io 등)는 크기가 크기 때문에
+    #   일반 kubectl apply는 last-applied-configuration 어노테이션에 전체 내용을
+    #   저장하려다 K8s 어노테이션 한도(262144 bytes)를 초과하여 오류가 발생한다.
+    #   --server-side는 서버가 직접 병합을 처리하므로 어노테이션 저장이 불필요하다.
+    - name: Install ArgoCD (stable, server-side apply)
+      command: >
+        kubectl apply -n argocd --server-side --force-conflicts -f
+        https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+      register: argocd_install
+      changed_when: "'configured' in argocd_install.stdout or 'created' in argocd_install.stdout"
+
+    # ── ArgoCD 서버 Ready 대기 ────────────────────────────────
+    # argocd-server Deployment가 Available이 될 때까지 최대 3분 대기.
+    # 이 이후에 Application CRD를 적용해야 argocd-application-controller가
+    # Application 리소스를 인식할 수 있다.
+    - name: Wait for argocd-server to be Available
+      command: >
+        kubectl wait --namespace argocd
+        --for=condition=available deployment/argocd-server
+        --timeout=180s
+      changed_when: false
+
+    # ── microlens Application CRD 렌더링 + 적용 ─────────────
+    # argocd/application.yaml (Jinja2 템플릿)을 렌더링하여 클러스터에 적용.
+    # argocd_repo_url, argocd_overlay 변수가 실제 값으로 치환된다.
+    - name: Render microlens Application manifest
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../argocd/application.yaml"
+        dest: /tmp/argocd-microlens-application.yaml
+
+    - name: Apply microlens Application to ArgoCD
+      command: kubectl apply -f /tmp/argocd-microlens-application.yaml
+      register: app_apply
+      changed_when: "'configured' in app_apply.stdout or 'created' in app_apply.stdout"
+
+    - name: Show Application apply result
+      ansible.builtin.debug:
+        var: app_apply.stdout
+
+    # ── ArgoCD 초기 관리자 비밀번호 출력 ─────────────────────
+    # ArgoCD v2.x 설치 시 argocd-initial-admin-secret 이 자동 생성됨.
+    # 시크릿이 생성될 때까지 최대 2분 대기 후 base64 디코딩하여 출력.
+    - name: Wait for argocd-initial-admin-secret
+      command: kubectl -n argocd get secret argocd-initial-admin-secret
+      register: secret_check
+      until: secret_check.rc == 0
+      retries: 12
+      delay: 10
+      changed_when: false
+
+    - name: Get ArgoCD initial admin password (base64 decoded)
+      shell: >
+        kubectl -n argocd get secret argocd-initial-admin-secret
+        -o jsonpath="{.data.password}" | base64 -d
+      register: argocd_password
+      changed_when: false
+
+    - name: Print ArgoCD access info
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "ArgoCD 설치 완료"
+          - "------------------------------------------------------------"
+          - "초기 관리자 비밀번호: {{ argocd_password.stdout }}"
+          - "접속 방법 (Control Plane에서 포트포워딩):"
+          - "  kubectl port-forward svc/argocd-server -n argocd 8080:443"
+          - "  → 로컬 브라우저: https://localhost:8080"
+          - "  ID: admin  /  PW: {{ argocd_password.stdout }}"
+          - "------------------------------------------------------------"
+          - "현재 동기화 경로: k8s/overlays/{{ argocd_overlay }}"
+          - "Phase 2 전환: ansible-playbook site.yml --tags argocd -e argocd_overlay=phase2"
+          - "============================================================"
