@@ -116,11 +116,19 @@ resource "aws_instance" "nat" {
   # OS 레벨 NAT 설정: IP 포워딩 활성화 + iptables masquerade
   user_data = <<-EOF
     #!/bin/bash
-    apt-get update -y
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    sysctl -p
-    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-    apt-get install -y iptables-persistent
+    set -e
+
+    # IP forwarding 활성화 (NAT 기능) - sysctl.conf에 영구 등록 후 즉시 적용
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-nat.conf
+    sysctl -p /etc/sysctl.d/99-nat.conf
+
+    # iptables MASQUERADE 규칙 (NAT) - Nitro 인스턴스는 ens5
+    iptables -t nat -A POSTROUTING -o ens5 -j MASQUERADE
+
+    # iptables-persistent: 설치 전에 DEBIAN_FRONTEND 설정으로 interactive prompt 방지
+    # debconf-set-selections로 iptables-persistent 설치 시 현재 규칙 저장 여부 응답을 자동화
+    DEBIAN_FRONTEND=noninteractive apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
     netfilter-persistent save
   EOF
 
