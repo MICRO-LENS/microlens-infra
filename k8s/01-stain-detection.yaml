@@ -85,14 +85,11 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 10
             failureThreshold: 3
-      # Toleration: 05-addons.yml에서 Worker Node에 건 dedicated=gpu:NoSchedule Taint를
-      # 허용하는 설정. 이 Toleration이 없는 Pod는 GPU 노드에 스케줄되지 않는다.
-      # GPU가 필요한 서비스만 이 설정을 가지고 있어 비용 효율적인 자원 배치가 가능하다.
-      tolerations:
-        - key: "dedicated"
-          operator: "Equal"
-          value: "gpu"
-          effect: "NoSchedule"
+      # nodeSelector: node-type=gpu 라벨이 있는 노드(g4dn.xlarge)에만 배치된다.
+      # nvidia.com/gpu: 1 resource limit과 함께 사용하여 GPU 노드 스케줄링을 이중으로 보장한다.
+      # Taint/Toleration 대신 Label/NodeSelector를 사용하므로 시스템 Pod들은 영향받지 않는다.
+      nodeSelector:
+        node-type: gpu
 ---
 # ============================================================
 # Service (ClusterIP)

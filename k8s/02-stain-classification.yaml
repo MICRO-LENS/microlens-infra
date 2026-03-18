@@ -72,8 +72,8 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
-          # tolerations 없음: GPU 노드의 Taint를 허용하지 않아
-          # 비싼 GPU 자원을 점유하지 않고 일반 노드에만 배치된다.
+      # nodeSelector 없음: GPU 노드 포함 어느 워커 노드든 CPU 여유가 있는 곳에 자유롭게 배치된다.
+      # Taint를 사용하지 않으므로 toleration도 필요 없다.
 ---
 apiVersion: v1
 kind: Service

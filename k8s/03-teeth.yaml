@@ -65,13 +65,10 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 10
             failureThreshold: 3
-      # GPU 노드 Taint(dedicated=gpu:NoSchedule) 허용.
-      # 01-stain-detection.yaml과 동일한 이유로 설정.
-      tolerations:
-        - key: "dedicated"
-          operator: "Equal"
-          value: "gpu"
-          effect: "NoSchedule"
+      # nodeSelector: 01-stain-detection.yaml과 동일한 전략.
+      # node-type=gpu 라벨 노드에만 배치되어 GPU 자원을 사용한다.
+      nodeSelector:
+        node-type: gpu
 ---
 apiVersion: v1
 kind: Service
