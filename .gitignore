@@ -42,12 +42,11 @@ kubeconfig.*
 # Ansible
 # ===========================
 *.retry
-inventory/hosts
-inventory/production
-inventory/staging
+inventory/
 vault_password_file
 .vault_pass
 *.vault
+*.ini
 
 # ===========================
 # Kubernetes

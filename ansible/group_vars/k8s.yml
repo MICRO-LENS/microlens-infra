@@ -1,7 +1,0 @@
-ansible_ssh_common_args: >
-  -o ProxyCommand="ssh -W %h:%p -q ubuntu@{{ groups['nat'][0] }}
-  -i ./microlens-key.pem
-  -o StrictHostKeyChecking=no
-  -o UserKnownHostsFile=/dev/null"
-  -o StrictHostKeyChecking=no
-  -o UserKnownHostsFile=/dev/null
