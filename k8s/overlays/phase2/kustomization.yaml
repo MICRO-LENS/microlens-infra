@@ -15,6 +15,9 @@ resources:
 #     stain-classification-api=<ECR_URL>/stain-classification-api:<SHA> \
 #     teeth-api=<ECR_URL>/teeth-api:<SHA>
 images:
+- name: microlens-client
+  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/microlens-client
+  newTag: 8b9dad7
 - name: stain-classification-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
   newTag: d861b78
@@ -23,7 +26,4 @@ images:
   newTag: d861b78
 - name: teeth-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
-  newTag: d861b78
-- name: microlens-client
-  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/microlens-client
   newTag: d861b78
