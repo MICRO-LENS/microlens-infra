@@ -1,7 +1,7 @@
 # microlens-infra
 
 MicroLens 프로젝트의 인프라스트럭처 전용 저장소입니다.
-Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구성하며, Kubernetes 매니페스트로 AI 서비스를 배포합니다.
+Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구성하며, Kustomize + ArgoCD로 Kubernetes 서비스를 배포합니다.
 
 ---
 
@@ -19,16 +19,17 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
   │  │  Bastion / NAT      │  │  Jenkins (t3.medium) │   │
   │  │  (t3.nano)          │  │  :8080               │   │
   │  │  SSH 진입점         │  │  GitHub Webhook 수신  │   │
-  │  │  프라이빗 트래픽    │  │  ECR Push            │   │
-  │  │  라우팅             │  └──────────┬──────────┘   │
-  │  └────────┬────────────┘             │ docker push  │
-  │           │ SSH ProxyJump            ▼              │
+  │  │  프라이빗 트래픽    │  │  ECR Push + ArgoCD   │   │
+  │  │  라우팅             │  │  이미지 태그 업데이트  │   │
+  │  └────────┬────────────┘  └──────────┬──────────┘   │
+  │           │ SSH ProxyJump            │ git push     │
   │           │              ECR (3개 리포지토리)         │
   │  프라이빗 서브넷                                      │
   │  ┌──────────────────────────────────────────────┐   │
   │  │  Kubernetes Cluster                          │   │
   │  │                                              │   │
   │  │  Control Plane (t3.medium)                   │   │
+  │  │  └── ArgoCD (microlens-infra 저장소 감시)    │   │
   │  │                                              │   │
   │  │  CPU Worker (t3.large) ← 시스템 Pod 전용     │   │
   │  │  ┌──────────────────────────────────────┐   │   │
@@ -64,41 +65,58 @@ microlens-infra/
 ├── backend.tf            # S3 원격 백엔드 + DynamoDB 락
 ├── provider.tf           # AWS / TLS / Local 프로바이더
 ├── outputs.tf            # 주요 리소스 출력값
-├── Makefile              # K8s 단계별 배포 명령
+├── Makefile              # teardown 명령
 ├── workflow.md           # 단계별 작업 흐름 가이드
 │
 ├── terraform/
 │   └── modules/
 │       ├── vpc/          # VPC, 퍼블릭·프라이빗 서브넷(각 2개), NAT 인스턴스, EIP
-│       ├── ec2/          # Control Plane, GPU Worker, CPU Worker, Jenkins, IAM
+│       ├── ec2/          # Control Plane, GPU Worker, CPU Worker, Jenkins, IAM, SG
 │       ├── s3/           # 모델 가중치 저장 버킷 (버전 관리 활성화)
-│       └── ecr/          # 컨테이너 이미지 레지스트리 (repositories 변수로 관리)
+│       └── ecr/          # 컨테이너 이미지 레지스트리 (3개 리포지토리)
 │
 ├── ansible/
-│   ├── ansible.cfg                    # 기본 설정 (키 경로, ProxyJump)
+│   ├── ansible.cfg                    # 기본 설정 (키 경로, ProxyJump, vault)
 │   ├── site.yml                       # 전체 실행 진입점
 │   ├── inventory/
 │   │   └── hosts.ini                  # 호스트 목록 (terraform output으로 IP 채우기)
 │   ├── group_vars/
 │   │   ├── all.yml                    # 공통 변수 (gpu_enabled, k8s_version)
-│   │   └── k8s.yml                    # Bastion ProxyJump SSH 설정
+│   │   ├── k8s.yml                    # Bastion ProxyJump SSH 설정
+│   │   └── jenkins.yml                # Jenkins 변수 (Ansible Vault 암호화)
 │   └── playbooks/
-│       ├── 00-nat.yml                 # NAT ip_forward + iptables MASQUERADE 설정
-│       ├── 01-common.yml              # containerd + kubelet/kubeadm/kubectl + 버전 고정
+│       ├── 00-nat.yml                 # NAT ip_forward + iptables MASQUERADE
+│       ├── 01-common.yml              # containerd + kubelet/kubeadm/kubectl + ECR credential provider
 │       ├── 02-gpu.yml                 # NVIDIA Driver + Container Toolkit (gpu_workers만)
 │       ├── 03-master.yml              # kubeadm init + Calico CNI + kubeconfig
 │       ├── 04-worker.yml              # kubeadm join (gpu_workers + cpu_workers)
-│       └── 05-addons.yml             # Metrics Server + Nginx Ingress + nvidia-device-plugin
-│                                      # GPU 노드 Taint + 라벨링, CPU 노드 라벨링
+│       ├── 05-addons.yml              # Metrics Server + Nginx Ingress + nvidia-device-plugin
+│       │                              # GPU 노드 Taint/라벨 + CPU 노드 라벨
+│       ├── 06-deploy-k8s.yml          # (Deprecated — ArgoCD가 대체)
+│       ├── 07-jenkins.yml             # Jenkins + Docker + AWS CLI + kubectl + kustomize 설치
+│       ├── 08-argocd.yml              # ArgoCD 설치 + microlens Application CRD 배포
+│       └── 09-upload-models.yml       # 모델 가중치 S3 업로드
 │
-└── k8s/
-    ├── 00-namespace.yaml              # microlens 네임스페이스
-    ├── 00-serviceaccount.yaml         # S3/ECR 접근용 ServiceAccount
-    ├── 01-stain-detection.yaml        # Deployment + Service (GPU, nodeSelector+Toleration)
-    ├── 02-stain-classification.yaml   # Deployment + Service (CPU, nodeSelector: node-type=cpu)
-    ├── 03-teeth.yaml                  # Deployment + Service (GPU, nodeSelector+Toleration)
-    ├── 04-ingress.yaml                # Nginx Ingress L7 경로 라우팅
-    └── 05-hpa.yaml                    # HPA × 3 (CPU 70%, max 5 replicas)
+├── k8s/
+│   ├── base/                          # Phase 1 — CPU 공통 리소스
+│   │   ├── 00-namespace.yaml          # microlens 네임스페이스
+│   │   ├── 00-serviceaccount.yaml     # S3/ECR 접근용 ServiceAccount
+│   │   ├── 02-stain-classification.yaml  # CPU Deployment + Service
+│   │   ├── 04-ingress.yaml            # Nginx Ingress L7 경로 라우팅
+│   │   ├── 05-hpa.yaml                # HPA — stain-classification
+│   │   └── kustomization.yaml
+│   │
+│   └── overlays/
+│       ├── phase1/                    # Phase 1 오버레이 (CPU만)
+│       │   └── kustomization.yaml
+│       └── phase2/                    # Phase 2 오버레이 (GPU 추가)
+│           ├── 01-stain-detection.yaml   # GPU Deployment + Service
+│           ├── 03-teeth.yaml             # GPU Deployment + Service
+│           ├── 05-hpa-gpu.yaml           # HPA — stain-detection, teeth
+│           └── kustomization.yaml        # 이미지 태그(commit SHA) 관리
+│
+└── argocd/
+    └── application.yaml               # ArgoCD Application CRD 템플릿 (Jinja2)
 ```
 
 ---
@@ -107,10 +125,8 @@ microlens-infra/
 
 모든 인스턴스의 AMI로 **Ubuntu 22.04 LTS (Canonical)** 를 사용합니다.
 
-초기 설계에서는 AWS 기본 이미지인 Amazon Linux 2를 사용했으나, 이 아키텍처의 핵심인 **GPU(g4dn.xlarge / NVIDIA T4)** 환경에서 Ubuntu가 명확히 유리하여 전환했습니다.
-
 | 항목 | Amazon Linux 2 | Ubuntu 22.04 |
-|------|---------------|----|
+|------|---------------|--------------|
 | NVIDIA 드라이버 설치 | CUDA rhel7 repo 수동 구성 + DKMS 빌드 | `ubuntu-drivers autoinstall` 한 줄 |
 | CUDA 저장소 유지보수 | rhel7 기반, 업데이트 느림 | Ubuntu 전용 공식 repo, 활발히 유지 |
 | K8s 공식 문서 기준 | rpm/yum 예시 드묾 | 거의 모든 공식 문서가 Ubuntu 기준 |
@@ -127,7 +143,9 @@ microlens-infra/
 | IaC | Terraform |
 | 서버 구성 | Ansible |
 | 컨테이너 오케스트레이션 | Kubernetes (kubeadm) |
-| CNI | Calico (Network Policy 지원, AWS 환경 IPIP 모드) |
+| CNI | Calico (NetworkPolicy 지원, IPIP 모드) |
+| K8s 패키지 관리 | Kustomize |
+| GitOps | ArgoCD |
 | CI/CD | Jenkins |
 
 ---
@@ -160,9 +178,9 @@ CPU Worker (t3.large) × 1
 
 | 서비스 | 노드 타입 | GPU | nodeSelector | Toleration |
 |--------|-----------|-----|--------------|------------|
-| stain-detection | GPU Worker | ✅ 1개 | node-type=gpu | dedicated=gpu |
+| stain-detection | GPU Worker | ✅ 1개 | node-type=gpu | dedicated=gpu:NoSchedule |
 | stain-classification | CPU Worker | ❌ | node-type=cpu | 없음 |
-| teeth | GPU Worker | ✅ 1개 | node-type=gpu | dedicated=gpu |
+| teeth | GPU Worker | ✅ 1개 | node-type=gpu | dedicated=gpu:NoSchedule |
 | ingress-nginx | CPU Worker | ❌ | 없음 | 없음 |
 | metrics-server | CPU Worker | ❌ | 없음 | 없음 |
 
@@ -178,7 +196,9 @@ CPU Worker (t3.large) × 1
 # group_vars/all.yml: gpu_enabled: false
 cd ansible
 ansible-playbook site.yml
-make deploy-cpu   # stain-classification(CPU)만 배포
+
+# ArgoCD가 k8s/overlays/phase1 를 감시하여 자동 배포
+# → stain-classification(CPU)만 배포됨
 ```
 
 ### Phase 2 — g4dn 전환 (쿼타 승인 후)
@@ -193,8 +213,19 @@ terraform apply
 # 2. group_vars/all.yml: gpu_enabled: true
 ansible-playbook ansible/site.yml --tags nat,gpu,addons
 
-# 3. GPU 서비스 포함 전체 배포
-make deploy-gpu
+# 3. ArgoCD Application CRD를 phase2 오버레이로 업데이트
+#    → stain-detection, teeth(GPU) 포함 전체 서비스 자동 배포
+ansible-playbook ansible/playbooks/08-argocd.yml -e argocd_overlay=phase2
+```
+
+### Jenkins CI 파이프라인 흐름
+
+```
+GitHub Push
+  → Jenkins Webhook 수신
+  → Docker Build + ECR Push
+  → kustomize edit set image (commit SHA 태그)
+  → git push → ArgoCD 자동 감지 + 배포
 ```
 
 ---
@@ -238,23 +269,25 @@ ansible-playbook site.yml --tags common   # containerd + kubeadm 설치
 ansible-playbook site.yml --tags master   # kubeadm init + Calico
 ansible-playbook site.yml --tags worker   # kubeadm join
 ansible-playbook site.yml --tags addons   # Ingress + Metrics Server + 노드 라벨/Taint
+ansible-playbook playbooks/07-jenkins.yml # Jenkins 설치
+ansible-playbook playbooks/08-argocd.yml  # ArgoCD 설치 + Application 배포
 
 # CPU Worker 신규 추가 시
 ansible-playbook site.yml --tags common,worker --limit bastion,cpu_workers
 ansible-playbook site.yml --tags addons
 ```
 
-### K8s 배포
+### 리소스 정리
 
 ```bash
-make deploy-cpu   # Phase 1: GPU 서비스 제외
-make deploy-gpu   # Phase 2: 전체 서비스
+make teardown   # microlens 네임스페이스 및 하위 모든 리소스 삭제
 ```
 
 ---
 
 ## 클러스터 상태 확인
-kubectl 은 클러스터 전체를 API Server를 통해 조회하기 때문에, Control Plane 한 곳에서 모든 노드/Pod 상태를 볼 수 있습니다.
+
+kubectl은 Control Plane 한 곳에서 모든 노드/Pod 상태를 조회할 수 있습니다.
 
 ### 노드 상태
 
@@ -286,9 +319,10 @@ kubectl get pods -n microlens -o wide --no-headers | \
 # Pod별 CPU/메모리 실시간 사용량
 kubectl top pods -n microlens
 
-# 시스템 Pod 상태 (ingress-nginx, metrics-server)
+# 시스템 Pod 상태
 kubectl get pods -n ingress-nginx -o wide
 kubectl get pods -n kube-system -o wide
+kubectl get pods -n argocd -o wide
 ```
 
 ### 자원 점유 상세
@@ -306,6 +340,20 @@ kubectl get nodes -o json | \
 
 # HPA 상태 (현재 replica 수, CPU 사용률)
 kubectl get hpa -n microlens
+```
+
+### ArgoCD 상태
+
+```bash
+# Application 동기화 상태 확인
+kubectl get application -n argocd
+
+# ArgoCD UI 접근 (포트포워딩)
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+
+# 초기 admin 비밀번호
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d
 ```
 
 ### 로그 확인
