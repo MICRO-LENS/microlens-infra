@@ -16,6 +16,7 @@ module "ecr" {
     "stain-detection-api",
     "stain-classification-api",
     "teeth-api",
+    "microlens-client",
   ]
 }
 

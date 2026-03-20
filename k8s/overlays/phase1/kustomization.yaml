@@ -13,3 +13,6 @@ images:
   - name: stain-classification-api
     newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
     newTag: "latest"
+  - name: microlens-client
+    newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/microlens-client
+    newTag: "latest"

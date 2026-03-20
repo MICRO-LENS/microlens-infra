@@ -8,7 +8,7 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
 ## 아키텍처 개요
 
 ```
-  [ Android Client ]
+  [ Web Client (React + Vite) ]
          │ HTTPS
          ▼
   ┌──────────────────────────────────────────────────────┐
@@ -384,4 +384,4 @@ sudo iptables -t nat -L POSTROUTING -n -v  # MASQUERADE 규칙 확인
 ## 관련 저장소
 
 - [microlens-ai-api](../microlens-ai-api) — FastAPI 백엔드 서버
-- [microlens-android](../microlens-android) — Android 클라이언트 앱
+- [microlens-client](../microlens-client) — Next.js 웹 클라이언트

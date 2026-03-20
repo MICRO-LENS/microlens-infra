@@ -7,3 +7,4 @@ resources:
   - 02-stain-classification.yaml
   - 04-ingress.yaml
   - 05-hpa.yaml
+  - 06-client.yaml

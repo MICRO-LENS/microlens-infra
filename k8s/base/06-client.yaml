@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: microlens-client
+  namespace: microlens
+  labels:
+    app: microlens-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: microlens-client
+  template:
+    metadata:
+      labels:
+        app: microlens-client
+    spec:
+      serviceAccountName: microlens-sa
+      containers:
+        - name: microlens-client
+          # overlay의 images: 블록이 이 이름을 기준으로 ECR URL + 커밋 SHA 태그로 교체한다
+          image: microlens-client:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      nodeSelector:
+        node-type: cpu
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: microlens-client-svc
+  namespace: microlens
+spec:
+  selector:
+    app: microlens-client
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+---
+# ============================================================
+# 클라이언트 전용 Ingress (04-ingress.yaml과 분리)
+#
+# 분리 이유:
+#   04-ingress.yaml은 rewrite-target: /predict 어노테이션을 가지고 있는데
+#   이 어노테이션은 Ingress 오브젝트 전체에 적용된다.
+#   클라이언트의 / 경로에 rewrite를 적용하면 정적 파일 서빙이 깨지므로
+#   rewrite 없는 별도 Ingress로 처리한다.
+#
+# 트래픽 흐름:
+#   브라우저 → NAT 공인 IP:NodePort → Nginx Ingress Controller
+#     → / (클라이언트 Ingress) → microlens-client-svc → microlens-client Pod
+#     → /stain/*, /teeth/* (AI API Ingress) → 각 AI 서비스 Pod
+#
+# Nginx Ingress 경로 우선순위:
+#   더 구체적인 경로(/stain/detect 등)가 / 보다 항상 먼저 매칭된다.
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: microlens-client-ingress
+  namespace: microlens
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: microlens-client-svc
+                port:
+                  number: 80
