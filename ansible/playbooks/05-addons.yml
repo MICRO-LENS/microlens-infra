@@ -45,10 +45,10 @@
     # metrics-server가 kubelet API 접근 시 인증서 검증에 실패한다.
     # --kubelet-insecure-tls 플래그로 검증을 건너뛰어야 kubectl top이 동작한다.
     - name: Patch Metrics Server to skip kubelet TLS verification
-      command: >
-        kubectl patch deployment metrics-server -n kube-system
-        --type=json
-        -p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]
+      shell: |
+        kubectl patch deployment metrics-server -n kube-system \
+          --type=json \
+          -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
 
     # ── Nginx Ingress Controller ───────────────────────────
     # 외부 트래픽의 단일 진입점으로, L7(HTTP) 경로 기반 라우팅을 담당한다.
@@ -77,10 +77,10 @@
       changed_when: false
 
     - name: Fix Nginx Ingress HTTP NodePort to 30080
-      command: >
-        kubectl patch svc ingress-nginx-controller -n ingress-nginx
-        --type=json
-        -p=[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]
+      shell: |
+        kubectl patch svc ingress-nginx-controller -n ingress-nginx \
+          --type=json \
+          -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]'
       changed_when: true
 
     # ── GPU 워커 노드 라벨 + Taint ──────────────────────────

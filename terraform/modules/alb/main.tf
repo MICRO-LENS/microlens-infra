@@ -120,12 +120,17 @@ resource "aws_lb_listener" "https" {
 # Target Group에 GPU 워커 + CPU 워커 전체 등록
 # K8s NodePort 특성상 어느 노드로 트래픽이 와도
 # kube-proxy가 실제 Pod가 있는 노드로 전달한다
+#
+# count 사용 이유:
+#   for_each + toset()은 plan 시점에 키가 확정되어야 하는데
+#   EC2 인스턴스 ID는 apply 전까지 알 수 없어 오류가 발생한다.
+#   count는 길이(정수)만 plan 시점에 알면 되므로 이 제약을 우회한다.
 # ============================================================
 resource "aws_lb_target_group_attachment" "workers" {
-  for_each = toset(var.worker_instance_ids)
+  count = length(var.worker_instance_ids)
 
   target_group_arn = aws_lb_target_group.this.arn
-  target_id        = each.value
+  target_id        = var.worker_instance_ids[count.index]
   port             = var.nginx_nodeport
 }
 
