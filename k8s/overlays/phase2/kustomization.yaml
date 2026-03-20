@@ -20,10 +20,10 @@ images:
   newTag: 8b9dad7
 - name: stain-classification-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
-  newTag: d861b78
+  newTag: 76bd305
 - name: stain-detection-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
-  newTag: d861b78
+  newTag: 76bd305
 - name: teeth-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
-  newTag: d861b78
+  newTag: 76bd305
