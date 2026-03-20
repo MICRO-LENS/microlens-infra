@@ -23,9 +23,17 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
   │  │  라우팅             │  │  이미지 태그 업데이트  │   │
   │  └────────┬────────────┘  └──────────┬──────────┘   │
   │           │ SSH ProxyJump            │ git push     │
-  │           │              ECR (3개 리포지토리)         │
-  │  프라이빗 서브넷                                      │
-  │  ┌──────────────────────────────────────────────┐   │
+  │                                                      │
+  │  ┌─────────────────────────────────────────────┐    │
+  │  │  ALB (Application Load Balancer)            │    │
+  │  │  microlens.cloud                            │    │
+  │  │  HTTP :80  → HTTPS 리다이렉트               │    │
+  │  │  HTTPS :443 → Nginx Ingress NodePort 30080  │    │
+  │  │  ACM 인증서 (microlens.cloud, *.microlens.cloud) │ │
+  │  └───────────────────┬─────────────────────────┘    │
+  │                      │              ECR (4개 리포지토리)│
+  │  프라이빗 서브넷      │                               │
+  │  ┌───────────────────▼──────────────────────────┐   │
   │  │  Kubernetes Cluster                          │   │
   │  │                                              │   │
   │  │  Control Plane (t3.medium)                   │   │
@@ -33,7 +41,9 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
   │  │                                              │   │
   │  │  CPU Worker (t3.large) ← 시스템 Pod 전용     │   │
   │  │  ┌──────────────────────────────────────┐   │   │
-  │  │  │  ingress-nginx / metrics-server      │   │   │
+  │  │  │  ingress-nginx (NodePort 30080)      │   │   │
+  │  │  │  metrics-server                      │   │   │
+  │  │  │  microlens-client (React)            │   │   │
   │  │  │  stain-classification (CPU)          │   │   │
   │  │  └──────────────────────────────────────┘   │   │
   │  │                                              │   │
@@ -45,12 +55,14 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
   │  │  └──────────────────────────────────────┘   │   │
   │  │                                              │   │
   │  │  Nginx Ingress                               │   │
+  │  │  /               → microlens-client          │   │
   │  │  /stain/detect   → stain-detection           │   │
   │  │  /stain/classify → stain-classification      │   │
   │  │  /teeth/check    → teeth                     │   │
   │  └──────────────────────────────────────────────┘   │
   │                                                      │
   │  S3: microlens-model-weights (모델 가중치)            │
+  │  Route 53: microlens.cloud Hosted Zone              │
   └──────────────────────────────────────────────────────┘
 ```
 
@@ -60,7 +72,7 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
 
 ```
 microlens-infra/
-├── main.tf               # 모듈 orchestration (vpc, ec2, s3, ecr)
+├── main.tf               # 모듈 orchestration (vpc, ec2, s3, ecr, route53, acm, alb)
 ├── auth.tf               # IAM 그룹/사용자, SSH 키 페어
 ├── backend.tf            # S3 원격 백엔드 + DynamoDB 락
 ├── provider.tf           # AWS / TLS / Local 프로바이더
@@ -73,7 +85,10 @@ microlens-infra/
 │       ├── vpc/          # VPC, 퍼블릭·프라이빗 서브넷(각 2개), NAT 인스턴스, EIP
 │       ├── ec2/          # Control Plane, GPU Worker, CPU Worker, Jenkins, IAM, SG
 │       ├── s3/           # 모델 가중치 저장 버킷 (버전 관리 활성화)
-│       └── ecr/          # 컨테이너 이미지 레지스트리 (3개 리포지토리)
+│       ├── ecr/          # 컨테이너 이미지 레지스트리 (4개 리포지토리)
+│       ├── route53/      # microlens.cloud Hosted Zone
+│       ├── acm/          # SSL 인증서 발급 + Route 53 DNS 자동 검증
+│       └── alb/          # ALB + HTTPS 리스너 + Target Group + A 레코드
 │
 ├── ansible/
 │   ├── ansible.cfg                    # 기본 설정 (키 경로, ProxyJump, vault)
@@ -90,20 +105,21 @@ microlens-infra/
 │       ├── 02-gpu.yml                 # NVIDIA Driver + Container Toolkit (gpu_workers만)
 │       ├── 03-master.yml              # kubeadm init + Calico CNI + kubeconfig
 │       ├── 04-worker.yml              # kubeadm join (gpu_workers + cpu_workers)
-│       ├── 05-addons.yml              # Metrics Server + Nginx Ingress + nvidia-device-plugin
-│       │                              # GPU 노드 Taint/라벨 + CPU 노드 라벨
+│       ├── 05-addons.yml              # Metrics Server + Nginx Ingress(NodePort 30080 고정)
+│       │                              # nvidia-device-plugin + GPU/CPU 노드 Taint/라벨
 │       ├── 06-deploy-k8s.yml          # (Deprecated — ArgoCD가 대체)
 │       ├── 07-jenkins.yml             # Jenkins + Docker + AWS CLI + kubectl + kustomize 설치
 │       ├── 08-argocd.yml              # ArgoCD 설치 + microlens Application CRD 배포
 │       └── 09-upload-models.yml       # 모델 가중치 S3 업로드
 │
 ├── k8s/
-│   ├── base/                          # Phase 1 — CPU 공통 리소스
+│   ├── base/                          # 공통 리소스
 │   │   ├── 00-namespace.yaml          # microlens 네임스페이스
 │   │   ├── 00-serviceaccount.yaml     # S3/ECR 접근용 ServiceAccount
 │   │   ├── 02-stain-classification.yaml  # CPU Deployment + Service
-│   │   ├── 04-ingress.yaml            # Nginx Ingress L7 경로 라우팅
+│   │   ├── 04-ingress.yaml            # Nginx Ingress L7 경로 라우팅 (AI API)
 │   │   ├── 05-hpa.yaml                # HPA — stain-classification
+│   │   ├── 06-client.yaml             # microlens-client Deployment + Service + Ingress
 │   │   └── kustomization.yaml
 │   │
 │   └── overlays/
@@ -139,7 +155,7 @@ microlens-infra/
 
 | 분류 | 기술 |
 |------|------|
-| 클라우드 | AWS (EC2, ECR, S3, VPC) |
+| 클라우드 | AWS (EC2, ECR, S3, VPC, ALB, ACM, Route 53) |
 | IaC | Terraform |
 | 서버 구성 | Ansible |
 | 컨테이너 오케스트레이션 | Kubernetes (kubeadm) |
@@ -173,6 +189,7 @@ GPU Worker (g4dn.xlarge) × 2
 CPU Worker (t3.large) × 1
   Label:        node-type=cpu
   배치 Pod:     stain-classification (nodeSelector: node-type=cpu)
+                microlens-client (nodeSelector: node-type=cpu)
                 ingress-nginx, metrics-server (Taint 없어 자연 배치)
 ```
 
@@ -181,8 +198,46 @@ CPU Worker (t3.large) × 1
 | stain-detection | GPU Worker | ✅ 1개 | node-type=gpu | dedicated=gpu:NoSchedule |
 | stain-classification | CPU Worker | ❌ | node-type=cpu | 없음 |
 | teeth | GPU Worker | ✅ 1개 | node-type=gpu | dedicated=gpu:NoSchedule |
+| microlens-client | CPU Worker | ❌ | node-type=cpu | 없음 |
 | ingress-nginx | CPU Worker | ❌ | 없음 | 없음 |
 | metrics-server | CPU Worker | ❌ | 없음 | 없음 |
+
+---
+
+## 도메인 및 HTTPS 구성
+
+### 트래픽 흐름
+
+```
+브라우저 → microlens.cloud (Route 53 A Alias)
+  → ALB :443 (ACM 인증서, TLS 종료)
+    → HTTP 리다이렉트: :80 → :443 (301)
+  → K8s 워커 노드 NodePort 30080
+  → Nginx Ingress Controller
+  → /               → microlens-client-svc
+  → /stain/detect   → stain-detection-svc  → /predict
+  → /stain/classify → stain-classification-svc → /predict
+  → /teeth/check    → teeth-svc           → /predict
+```
+
+### Ingress 분리 구조
+
+AI API와 웹 클라이언트는 Ingress 오브젝트를 분리합니다.
+
+| Ingress | 파일 | 어노테이션 | 대상 |
+|---------|------|-----------|------|
+| `microlens-ingress` | `04-ingress.yaml` | `rewrite-target: /predict` | AI API 3종 |
+| `microlens-client-ingress` | `06-client.yaml` | 없음 | React 클라이언트 |
+
+> rewrite-target 어노테이션은 Ingress 오브젝트 전체에 적용되기 때문에, 클라이언트(정적 파일 서빙)와 AI API(경로 rewrite 필요)를 같은 Ingress에 넣으면 클라이언트 라우팅이 깨집니다.
+
+### Nginx Ingress NodePort 고정
+
+ALB Target Group은 고정 포트(30080)를 바라봅니다. `05-addons.yml`에서 Nginx Ingress 설치 후 NodePort를 30080으로 패치합니다.
+
+```
+ALB → 워커 노드:30080 → Nginx Ingress Pod
+```
 
 ---
 
@@ -198,7 +253,7 @@ cd ansible
 ansible-playbook site.yml
 
 # ArgoCD가 k8s/overlays/phase1 를 감시하여 자동 배포
-# → stain-classification(CPU)만 배포됨
+# → stain-classification(CPU) + microlens-client 배포됨
 ```
 
 ### Phase 2 — g4dn 전환 (쿼타 승인 후)
@@ -221,9 +276,10 @@ ansible-playbook ansible/playbooks/08-argocd.yml -e argocd_overlay=phase2
 ### Jenkins CI 파이프라인 흐름
 
 ```
-GitHub Push
+GitHub Push (microlens-ai-api 또는 microlens-client)
   → Jenkins Webhook 수신
-  → Docker Build + ECR Push
+  → Docker Build (VITE_API_BASE_URL="" — 상대 URL 사용)
+  → ECR Push
   → kustomize edit set image (commit SHA 태그)
   → git push → ArgoCD 자동 감지 + 배포
 ```
@@ -255,6 +311,20 @@ terraform init -migrate-state
 terraform output
 ```
 
+### 도메인 연결 (가비아 → Route 53)
+
+```bash
+# terraform apply 완료 후 NS 레코드 4개 확인
+terraform output route53_name_servers
+
+# 가비아 콘솔 → 도메인 관리 → 네임서버 설정에 위 4개 입력
+# DNS 전파 확인 (보통 수 분 이내)
+dig NS microlens.cloud
+```
+
+> **주의**: `terraform apply` 중 `aws_acm_certificate_validation`이 대기 상태로 멈출 수 있습니다.
+> 가비아에 네임서버를 입력하고 DNS가 전파되면 ACM 검증이 자동 완료되며 apply가 진행됩니다.
+
 ### Ansible 실행
 
 ```bash
@@ -268,7 +338,7 @@ ansible-playbook site.yml --tags nat      # NAT ip_forward + iptables
 ansible-playbook site.yml --tags common   # containerd + kubeadm 설치
 ansible-playbook site.yml --tags master   # kubeadm init + Calico
 ansible-playbook site.yml --tags worker   # kubeadm join
-ansible-playbook site.yml --tags addons   # Ingress + Metrics Server + 노드 라벨/Taint
+ansible-playbook site.yml --tags addons   # Ingress(NodePort 30080) + Metrics Server + 노드 라벨/Taint
 ansible-playbook playbooks/07-jenkins.yml # Jenkins 설치
 ansible-playbook playbooks/08-argocd.yml  # ArgoCD 설치 + Application 배포
 
@@ -363,6 +433,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
 kubectl logs -n microlens -l app=stain-detection --tail=50
 kubectl logs -n microlens -l app=stain-classification --tail=50
 kubectl logs -n microlens -l app=teeth --tail=50
+kubectl logs -n microlens -l app=microlens-client --tail=50
 
 # 이전 컨테이너 로그 (CrashLoopBackOff 디버깅)
 kubectl logs -n microlens <pod-name> --previous
@@ -384,4 +455,4 @@ sudo iptables -t nat -L POSTROUTING -n -v  # MASQUERADE 규칙 확인
 ## 관련 저장소
 
 - [microlens-ai-api](../microlens-ai-api) — FastAPI 백엔드 서버
-- [microlens-client](../microlens-client) — Next.js 웹 클라이언트
+- [microlens-client](../microlens-client) — React + Vite 웹 클라이언트

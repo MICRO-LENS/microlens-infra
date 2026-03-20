@@ -3,6 +3,51 @@ module "vpc" {
   name_prefix = "microlens"
 }
 
+module "route53" {
+  source      = "./modules/route53"
+  name_prefix = "microlens"
+  domain      = "microlens.cloud"
+}
+
+module "acm" {
+  source      = "./modules/acm"
+  name_prefix = "microlens"
+  domain      = "microlens.cloud"
+  zone_id     = module.route53.zone_id
+}
+
+module "alb" {
+  source      = "./modules/alb"
+  name_prefix = "microlens"
+  vpc_id      = module.vpc.vpc_id
+  public_subnet_ids = module.vpc.public_subnet_ids
+
+  certificate_arn = module.acm.certificate_arn
+  zone_id         = module.route53.zone_id
+  domain          = "microlens.cloud"
+
+  # GPU 워커 + CPU 워커 전체를 Target Group에 등록
+  worker_instance_ids = concat(
+    module.ec2.worker_instance_ids,
+    module.ec2.cpu_worker_instance_ids,
+  )
+
+  nodes_security_group_id = module.ec2.node_security_group_id
+}
+
+# ALB → K8s 노드 NodePort 30080 인그레스 규칙
+# ALB 모듈과 EC2 모듈 사이의 순환 의존성을 피하기 위해
+# main.tf에서 별도 규칙으로 추가한다
+resource "aws_security_group_rule" "alb_to_nodes" {
+  type                     = "ingress"
+  description              = "ALB to Nginx Ingress NodePort"
+  from_port                = 30080
+  to_port                  = 30080
+  protocol                 = "tcp"
+  security_group_id        = module.ec2.node_security_group_id
+  source_security_group_id = module.alb.alb_security_group_id
+}
+
 module "s3" {
   source            = "./modules/s3"
   name_prefix       = "microlens"

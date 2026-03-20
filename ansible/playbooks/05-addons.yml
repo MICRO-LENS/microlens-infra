@@ -64,6 +64,25 @@
         kubectl apply -f
         https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/baremetal/deploy.yaml
 
+    # ── Nginx Ingress NodePort 고정 ─────────────────────────
+    # ALB Target Group이 고정 포트(30080)를 바라보기 때문에
+    # NodePort를 랜덤 값에서 30080으로 패치한다.
+    # baremetal 매니페스트 기준으로 ports[0] = http(80), ports[1] = https(443)
+    - name: Wait for ingress-nginx-controller service
+      command: kubectl get svc ingress-nginx-controller -n ingress-nginx
+      register: ingress_svc
+      until: ingress_svc.rc == 0
+      retries: 12
+      delay: 10
+      changed_when: false
+
+    - name: Fix Nginx Ingress HTTP NodePort to 30080
+      command: >
+        kubectl patch svc ingress-nginx-controller -n ingress-nginx
+        --type=json
+        -p=[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]
+      changed_when: true
+
     # ── GPU 워커 노드 라벨 + Taint ──────────────────────────
     # 전략: CPU 워커 노드가 추가되었으므로 Taint 전략을 적용한다.
     #

@@ -32,3 +32,13 @@ output "jenkins_public_ip" {
 output "jenkins_instance_id" {
   value = module.ec2.jenkins_instance_id
 }
+
+output "route53_name_servers" {
+  value       = module.route53.name_servers
+  description = "가비아 네임서버 설정에 입력할 NS 레코드 4개"
+}
+
+output "alb_dns_name" {
+  value       = module.alb.alb_dns_name
+  description = "ALB DNS 이름 (디버깅용, 실제 접속은 microlens.cloud 사용)"
+}
