@@ -15,15 +15,15 @@ resources:
 #     stain-classification-api=<ECR_URL>/stain-classification-api:<SHA> \
 #     teeth-api=<ECR_URL>/teeth-api:<SHA>
 images:
-- name: stain-classification-api
-  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
-  newTag: d861b78
-- name: stain-detection-api
-  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
-  newTag: d861b78
-- name: teeth-api
-  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
-  newTag: d861b78
 - name: microlens-client
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/microlens-client
-  newTag: d861b78
+  newTag: 54359b5
+- name: stain-classification-api
+  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
+  newTag: 76bd305
+- name: stain-detection-api
+  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
+  newTag: 76bd305
+- name: teeth-api
+  newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
+  newTag: 76bd305
