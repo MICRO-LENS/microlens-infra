@@ -166,18 +166,18 @@
       get_url:
         url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
         dest: /tmp/awscliv2.zip
-      when: awscli_check.rc != 0 or 'aws-cli/2' not in awscli_check.stdout
+      when: awscli_check.rc != 0 or 'aws-cli/2' not in (awscli_check.stdout + awscli_check.stderr)
 
     - name: Unzip AWS CLI v2 installer
       unarchive:
         src: /tmp/awscliv2.zip
         dest: /tmp/
         remote_src: true
-      when: awscli_check.rc != 0 or 'aws-cli/2' not in awscli_check.stdout
+      when: awscli_check.rc != 0 or 'aws-cli/2' not in (awscli_check.stdout + awscli_check.stderr)
 
     - name: Install AWS CLI v2
       command: /tmp/aws/install --update
-      when: awscli_check.rc != 0 or 'aws-cli/2' not in awscli_check.stdout
+      when: awscli_check.rc != 0 or 'aws-cli/2' not in (awscli_check.stdout + awscli_check.stderr)
 
     # ── kubectl ───────────────────────────────────────────
     # K8s 클러스터 상태 확인 및 매니페스트 검증용.
@@ -255,13 +255,11 @@
             jenkins_admin_password: "your-password"
       when: jenkins_admin_password == ""
 
-    - name: Show Jenkins access info
+    - name: Show Jenkins credentials
       debug:
         msg:
-          - "============================================================"
-          - "Jenkins 접속 URL: http://<Jenkins EIP>:8080"
-          - "(EIP 확인: terraform output 또는 AWS 콘솔 → EC2 → microlens-jenkins)"
-          - "============================================================"
+          - "Jenkins admin user     : {{ jenkins_admin_user }}"
+          - "Jenkins admin password : {{ jenkins_admin_password }}"
 
     # ── Setup Wizard 자동 건너뛰기 ──────────────────────────
     # Jenkins 최초 기동 시 Setup Wizard(초기 설정 화면)가 표시된다.
@@ -281,6 +279,39 @@
         name: jenkins
         state: restarted
       when: wizard_state.changed
+
+    # XML 파일 직접 수정 방식은 재시작 타이밍에 따라 CLI가 URL을 인식 못하는 문제가 있다.
+    # init.groovy.d 스크립트는 Jenkins 기동 시 반드시 실행되므로 더 안정적이다.
+    - name: Ensure init.groovy.d directory exists
+      file:
+        path: /var/lib/jenkins/init.groovy.d
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: "0755"
+
+    # EC2 메타데이터에서 퍼블릭 IP(EIP) 조회
+    - name: Get public IP from EC2 metadata
+      uri:
+        url: http://169.254.169.254/latest/meta-data/public-ipv4
+        return_content: true
+      register: ec2_public_ip
+      changed_when: false
+
+    - name: Set Jenkins URL via init groovy script
+      copy:
+        dest: /var/lib/jenkins/init.groovy.d/set-jenkins-url.groovy
+        content: |
+          import jenkins.model.*
+          JenkinsLocationConfiguration.get().setUrl("http://{{ ec2_public_ip.content }}:8080/")
+          JenkinsLocationConfiguration.get().save()
+        owner: jenkins
+        group: jenkins
+        mode: "0644"
+      notify: restart jenkins
+
+    - name: Flush handlers (Jenkins URL 설정 후 재시작 적용)
+      meta: flush_handlers
 
     # Jenkins가 재시작 완료되어 API를 받을 준비가 될 때까지 대기
     - name: Wait for Jenkins to be fully operational
@@ -303,15 +334,30 @@
         dest: /tmp/jenkins-cli.jar
         force: true
 
+    - name: Check installed Jenkins plugins
+      command: >
+        java -jar /tmp/jenkins-cli.jar
+        -s http://{{ ec2_public_ip.content }}:8080
+        -auth {{ jenkins_admin_user }}:{{ jenkins_admin_password }}
+        list-plugins
+      register: installed_plugins
+      changed_when: false
+      failed_when: false
+
     - name: Install required Jenkins plugins
       command: >
         java -jar /tmp/jenkins-cli.jar
-        -s http://localhost:8080
+        -s http://{{ ec2_public_ip.content }}:8080
         -auth {{ jenkins_admin_user }}:{{ jenkins_admin_password }}
-        install-plugin ssh-credentials git workflow-aggregator -restart
+        install-plugin ssh-credentials git github workflow-aggregator -restart
       register: plugin_install
       changed_when: plugin_install.rc == 0
-      failed_when: false
+      failed_when: plugin_install.rc != 0
+      when: >
+        'ssh-credentials' not in installed_plugins.stdout or
+        'git ' not in installed_plugins.stdout or
+        'github ' not in installed_plugins.stdout or
+        'workflow-aggregator' not in installed_plugins.stdout
 
     # 플러그인 설치 후 Jenkins가 재시작되므로 다시 대기
     # port: 8080 오픈은 Jenkins 내부 초기화 완료를 보장하지 않는다.
@@ -325,6 +371,7 @@
       until: jenkins_login_ready.status == 200
       retries: 24
       delay: 10
+      when: plugin_install.changed | default(false)
 
     # ── GitHub PAT Jenkins Credentials 등록 ─────────────────
     # 조직 정책으로 SSH Deploy Key가 차단된 경우 PAT(Personal Access Token)으로 대체.
@@ -386,6 +433,7 @@
         body:
           json: "{{ credential_payload | to_json }}"
         status_code: [200, 302]
+      no_log: false
       vars:
         credential_payload:
           "": "0"
@@ -397,9 +445,5 @@
             password: "{{ github_pat }}"
             stapler-class: "com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl"
             "$class": "com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl"
-      no_log: true
       when: cred_check is defined and cred_check.status | default(0) == 404
 
-    - name: Show PAT registration result
-      debug:
-        msg: "{{ 'GitHub PAT 등록 완료 (github-pat)' if (cred_check is defined and cred_check.status | default(0) == 404) else 'GitHub PAT 이미 등록되어 있음 — 스킵' }}"

@@ -86,7 +86,8 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - http:
+    - host: microlens.cloud
+      http:
         paths:
           - path: /
             pathType: Prefix

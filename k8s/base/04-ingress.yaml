@@ -45,8 +45,8 @@ spec:
   # 05-addons.yml에서 설치한 컨트롤러의 ingressClassName과 일치해야 한다
   ingressClassName: nginx
   rules:
-    # host 생략: 도메인이 없으므로 모든 호스트(IP 직접 접근 포함)에 규칙 적용
-    - http:
+    - host: microlens.cloud
+      http:
         paths:
           # 얼룩 탐지 API: /stain/detect → stain-detection-svc:/predict
           - path: /stain/detect
