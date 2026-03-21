@@ -17,13 +17,13 @@ resources:
 images:
 - name: microlens-client
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/microlens-client
-  newTag: 54359b5
+  newTag: 7aad319
 - name: stain-classification-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-classification-api
-  newTag: 76bd305
+  newTag: 813aa37
 - name: stain-detection-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/stain-detection-api
-  newTag: 76bd305
+  newTag: 813aa37
 - name: teeth-api
   newName: 399095820932.dkr.ecr.ap-northeast-2.amazonaws.com/teeth-api
-  newTag: 76bd305
+  newTag: 813aa37
