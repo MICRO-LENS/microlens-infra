@@ -9,7 +9,10 @@
 #   - 모델 재학습 후 새 버전 배포 시
 #
 # 실행 방법:
-#   ansible-playbook ansible/playbooks/09-upload-models.yml
+#   ansible-playbook ansible/playbooks/09-upload-models.yml          # 전체 업로드
+#   ansible-playbook ansible/playbooks/09-upload-models.yml --tags stain-detection
+#   ansible-playbook ansible/playbooks/09-upload-models.yml --tags stain-classification
+#   ansible-playbook ansible/playbooks/09-upload-models.yml --tags teeth
 #
 # 전제 조건:
 #   - AWS CLI 설치 및 자격증명 구성 (jina IAM user)
@@ -65,3 +68,29 @@
     - name: Show uploaded files
       debug:
         msg: "{{ s3_list.stdout_lines }}"
+
+  # ── 개별 모델 업로드 (--tags 로 선택 실행) ──────────────────────────
+
+    - name: Upload stain-detection model
+      command: >
+        aws s3 cp
+        {{ models_dir }}/stain_detection_best.onnx
+        s3://{{ model_bucket }}/{{ s3_prefix }}/stain_detection_best.onnx
+        --region ap-northeast-2
+      tags: stain-detection
+
+    - name: Upload stain-classification model
+      command: >
+        aws s3 cp
+        {{ models_dir }}/stain_classification_best.onnx
+        s3://{{ model_bucket }}/{{ s3_prefix }}/stain_classification_best.onnx
+        --region ap-northeast-2
+      tags: stain-classification
+
+    - name: Upload teeth model
+      command: >
+        aws s3 cp
+        {{ models_dir }}/teeth_best.onnx
+        s3://{{ model_bucket }}/{{ s3_prefix }}/teeth_best.onnx
+        --region ap-northeast-2
+      tags: teeth

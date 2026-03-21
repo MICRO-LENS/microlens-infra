@@ -47,7 +47,7 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
   │  │  │  stain-classification (CPU)          │   │   │
   │  │  └──────────────────────────────────────┘   │   │
   │  │                                              │   │
-  │  │  GPU Worker × 2 (g4dn.xlarge / T4)           │   │
+  │  │  GPU Worker × 2 (g4dn.xlarge / T4 16GB)      │   │
   │  │  Taint: dedicated=gpu:NoSchedule             │   │
   │  │  ┌──────────────────────────────────────┐   │   │
   │  │  │  stain-detection  (GPU)              │   │   │
@@ -163,6 +163,8 @@ microlens-infra/
 | K8s 패키지 관리 | Kustomize |
 | GitOps | ArgoCD |
 | CI/CD | Jenkins |
+| AI 모델 | YOLOv12 (ONNX, opset 17+) |
+| GPU 추론 | ONNX Runtime + CUDAExecutionProvider |
 
 ---
 
@@ -181,10 +183,11 @@ microlens-infra/
 ## 스케줄링 전략
 
 ```
-GPU Worker (g4dn.xlarge) × 2
+GPU Worker (g4dn.xlarge / T4 16GB) × 2
   Taint:        dedicated=gpu:NoSchedule  ← Toleration 없는 Pod 진입 차단
   Label:        node-type=gpu
-  배치 Pod:     stain-detection, teeth (GPU + Toleration + nodeSelector)
+  배치 Pod:     stain-detection, teeth (YOLOv12 + Toleration + nodeSelector)
+  GPU 메모리:   YOLOv12 모델 ~800~1200 MiB / 15360 MiB (여유 충분)
 
 CPU Worker (t3.large) × 1
   Label:        node-type=cpu
@@ -449,6 +452,30 @@ sudo iptables -t nat -L POSTROUTING -n -v  # MASQUERADE 규칙 확인
 ```
 
 > **주의**: `*.pem`, `*.tfvars`, `*.tfstate`, `microlens-key.pem` 은 절대 커밋하지 않습니다.
+
+---
+
+## YOLOv12 배포 주의사항
+
+### readinessProbe 설정
+
+YOLOv12 모델 로딩 시간이 YOLOv5 대비 길어지므로 `initialDelaySeconds`를 충분히 설정해야 합니다.
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 6
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 60
+  periodSeconds: 30
+```
 
 ---
 
