@@ -1,0 +1,170 @@
+---
+# ============================================================
+# 플레이북: 10-gpu-timeslicing.yml
+# 대상: masters 그룹 (kubectl 실행 위치)
+# 레이어: 클러스터 인프라 레이어 - GPU 자원 공유 설정
+#
+# 목적:
+#   NVIDIA GPU Time-Slicing을 활성화하여 물리 GPU 1개를
+#   여러 Pod이 공유할 수 있도록 가상 슬롯으로 분할한다.
+#
+# 배경:
+#   g4dn.xlarge(T4, 15360 MiB)에 stain-detection, teeth Pod가
+#   각각 ~385 MiB만 사용하므로 노드당 Pod 1개는 과도한 낭비.
+#   Time-Slicing으로 물리 GPU 1개 → 가상 슬롯 2개를 노출하면
+#   두 GPU Pod을 노드 1대에 동시 스케줄링할 수 있다.
+#
+# 동작 원리:
+#   1. nvidia-device-plugin-config ConfigMap(kube-system)을 생성/갱신
+#      → sharing.timeSlicing.replicas: 2 설정으로 슬롯 2개 선언
+#   2. nvidia-device-plugin DaemonSet에 --config-file 인수와
+#      ConfigMap 볼륨 마운트를 추가 (Strategic Merge Patch)
+#   3. GPU 노드에 nvidia.com/device-plugin.config=config 레이블 부착
+#      → device plugin이 해당 노드에서 이 config를 사용함을 인식
+#   4. DaemonSet Rollout Restart로 새 설정 반영
+#   5. 각 GPU 노드의 nvidia.com/gpu allocatable이 2로 증가했는지 확인
+#
+# 05-addons.yml과의 관계:
+#   05-addons.yml이 nvidia-device-plugin을 최초 설치한 이후에 실행한다.
+#   Time-Slicing은 클러스터가 완전히 구성된 후 별도 단계로 적용한다.
+#
+# 실행 순서상 위치:
+#   ... → 05-addons → ... → [10-gpu-timeslicing]
+#
+# 단독 실행:
+#   ansible-playbook site.yml --tags gpu-timeslicing
+#   ansible-playbook playbooks/10-gpu-timeslicing.yml
+# ============================================================
+- name: Enable GPU Time-Slicing (nvidia.com/gpu replicas=2)
+  hosts: masters
+  become: false   # ubuntu 계정의 kubeconfig로 kubectl 실행
+  tags: gpu-timeslicing
+
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+  tasks:
+    # ── GPU Time-Slicing 활성화 여부 가드 ──────────────────
+    # gpu_enabled: false 환경(t3.medium 검증 단계)에서는 전체 스킵.
+    - name: Skip if GPU not enabled
+      ansible.builtin.meta: end_play
+      when: not (gpu_enabled | bool)
+
+    # ── 1. Time-Slicing ConfigMap 생성 ─────────────────────
+    # nvidia-device-plugin이 참조할 설정을 kube-system에 등록한다.
+    # sharing.timeSlicing.replicas: 2
+    #   → nvidia-device-plugin이 이 노드에서 가상 GPU 슬롯 2개를
+    #     status.allocatable에 nvidia.com/gpu: 2 로 광고하게 된다.
+    # replicas 값만 바꾸면 슬롯 수를 조정할 수 있다(최대 T4 기준 ~8 권장).
+    - name: Apply nvidia time-slicing ConfigMap to kube-system
+      shell: |
+        kubectl apply -f - <<'EOF'
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: nvidia-device-plugin-config
+          namespace: kube-system
+        data:
+          config: |-
+            version: v1
+            sharing:
+              timeSlicing:
+                resources:
+                - name: nvidia.com/gpu
+                  replicas: 2
+        EOF
+      register: cm_result
+      changed_when: "'configured' in cm_result.stdout or 'created' in cm_result.stdout"
+
+    # ── 2. DaemonSet에 ConfigMap 마운트 + --config-file 인수 추가 ──
+    # Strategic Merge Patch로 기존 DaemonSet 스펙을 최소 변경한다.
+    #
+    # 패치 내용:
+    #   containers[0].args: ["--config-file=/config/config"]
+    #     → device plugin이 ConfigMap에서 설정을 읽도록 지시
+    #   containers[0].volumeMounts: ConfigMap → /config 마운트
+    #   volumes: nvidia-device-plugin-config ConfigMap 볼륨 추가
+    #
+    # 멱등성:
+    #   Strategic Merge Patch는 containers를 name 키로 병합하고
+    #   volumes를 name 키로 병합하므로 재실행해도 중복 추가되지 않는다.
+    #   단, args는 배열 전체를 교체하므로 주의(기존 args가 없다고 가정).
+    - name: Patch nvidia-device-plugin DaemonSet to use config-file
+      shell: |
+        kubectl patch daemonset nvidia-device-plugin-daemonset \
+          -n kube-system \
+          --type=strategic \
+          -p '{
+            "spec": {
+              "template": {
+                "spec": {
+                  "containers": [{
+                    "name": "nvidia-device-plugin-ctr",
+                    "args": ["--config-file=/config/config"],
+                    "volumeMounts": [{
+                      "name": "config",
+                      "mountPath": "/config",
+                      "readOnly": true
+                    }]
+                  }],
+                  "volumes": [{
+                    "name": "config",
+                    "configMap": {
+                      "name": "nvidia-device-plugin-config"
+                    }
+                  }]
+                }
+              }
+            }
+          }'
+      register: patch_result
+      changed_when: "'no change' not in patch_result.stdout"
+
+    # ── 3. GPU 노드에 device plugin config 레이블 부착 ─────
+    # nvidia-device-plugin이 노드별로 어떤 config를 적용할지 결정하는 레이블.
+    # 값 "config"는 ConfigMap data 블록의 키 이름과 일치해야 한다.
+    #
+    # 노드 식별:
+    #   인벤토리의 ansible_host(프라이빗 IP)로 INTERNAL-IP를 매칭하여
+    #   kubeadm이 부여한 노드명(호스트명)을 동적으로 찾는다.
+    - name: Label GPU nodes with device-plugin config name
+      shell: |
+        node=$(kubectl get nodes -o wide \
+          | awk '$6 == "{{ hostvars[item]['ansible_host'] }}" {print $1}')
+        kubectl label node "$node" \
+          nvidia.com/device-plugin.config=config --overwrite
+      loop: "{{ groups['gpu_workers'] }}"
+      register: label_result
+      changed_when: "'not labeled' not in label_result.stdout"
+
+    # ── 4. DaemonSet Rollout Restart ────────────────────────
+    # ConfigMap 내용과 DaemonSet 스펙 변경이 실행 중인 Pod에 반영되려면
+    # 명시적으로 재시작해야 한다(ConfigMap 변경은 자동 재시작 대상이 아님).
+    - name: Rollout restart nvidia-device-plugin DaemonSet
+      command: >
+        kubectl rollout restart daemonset nvidia-device-plugin-daemonset
+        -n kube-system
+
+    # ── 5. Rollout 완료 대기 ────────────────────────────────
+    - name: Wait for nvidia-device-plugin rollout to complete
+      command: >
+        kubectl rollout status daemonset nvidia-device-plugin-daemonset
+        -n kube-system
+        --timeout=120s
+      changed_when: false
+
+    # ── 6. 검증: 노드당 GPU 슬롯 2개 확인 ──────────────────
+    # Time-Slicing 적용 후 각 GPU 노드의 allocatable에
+    # nvidia.com/gpu: 2 가 보여야 한다.
+    # 이 값이 1이면 ConfigMap이 아직 반영되지 않은 것이므로
+    # device plugin Pod 로그를 확인해야 한다.
+    - name: Verify nvidia.com/gpu allocatable is 2 on GPU nodes
+      shell: |
+        node=$(kubectl get nodes -o wide \
+          | awk '$6 == "{{ hostvars[item]['ansible_host'] }}" {print $1}')
+        count=$(kubectl get node "$node" \
+          -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
+        echo "Node $node: nvidia.com/gpu allocatable = $count"
+        [ "$count" = "2" ] || (echo "ERROR: expected 2, got $count" && exit 1)
+      loop: "{{ groups['gpu_workers'] }}"
+      changed_when: false

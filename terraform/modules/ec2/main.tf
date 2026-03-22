@@ -41,9 +41,11 @@ resource "aws_instance" "control_plane" {
 }
 
 # ============================================================
-# EC2 – Worker Nodes
-# var.worker_instance_type: t3.medium(검증) → g4dn.xlarge(GPU)
-# var.worker_count:         0(쿼타 대기) → 2(승인 후)
+# EC2 – Worker Nodes (inference pair)
+# stain-detection × 2 + teeth × 2 를 podAntiAffinity로 분산.
+# 노드 1대 장애 시 나머지 노드가 두 서비스 모두 흡수 → HA.
+# var.worker_instance_type: t3.xlarge (4 vCPU, 16 GB) – CPU 추론
+# var.worker_count:         2 (AntiAffinity 분산 최소 단위)
 # ============================================================
 
 resource "aws_instance" "worker" {

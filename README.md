@@ -47,11 +47,12 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
   │  │  │  stain-classification (CPU)          │   │   │
   │  │  └──────────────────────────────────────┘   │   │
   │  │                                              │   │
-  │  │  GPU Worker × 2 (g4dn.xlarge / T4 16GB)      │   │
-  │  │  Taint: dedicated=gpu:NoSchedule             │   │
+  │  │  Inference Worker × 2 (t3.xlarge)            │   │
+  │  │  podAntiAffinity: required (노드 분산)        │   │
   │  │  ┌──────────────────────────────────────┐   │   │
-  │  │  │  stain-detection  (GPU)              │   │   │
-  │  │  │  teeth            (GPU)              │   │   │
+  │  │  │  worker-1: stain-detection-1, teeth-1│   │   │
+  │  │  │  worker-2: stain-detection-2, teeth-2│   │   │
+  │  │  │  노드 1대 장애 시 나머지가 전체 흡수  │   │   │
   │  │  └──────────────────────────────────────┘   │   │
   │  │                                              │   │
   │  │  Nginx Ingress                               │   │
@@ -72,18 +73,15 @@ Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구
 
 ```
 microlens-infra/
-├── main.tf               # 모듈 orchestration (vpc, ec2, s3, ecr, route53, acm, alb)
-├── auth.tf               # IAM 그룹/사용자, SSH 키 페어
-├── backend.tf            # S3 원격 백엔드 + DynamoDB 락
-├── provider.tf           # AWS / TLS / Local 프로바이더
-├── outputs.tf            # 주요 리소스 출력값
-├── Makefile              # teardown 명령
-├── workflow.md           # 단계별 작업 흐름 가이드
-│
 ├── terraform/
+│   ├── main.tf               # 모듈 orchestration (vpc, ec2, s3, ecr, route53, acm, alb)
+│   ├── auth.tf               # IAM 그룹/사용자, SSH 키 페어
+│   ├── backend.tf            # S3 원격 백엔드 + DynamoDB 락
+│   ├── provider.tf           # AWS / TLS / Local 프로바이더
+│   ├── outputs.tf            # 주요 리소스 출력값
 │   └── modules/
 │       ├── vpc/          # VPC, 퍼블릭·프라이빗 서브넷(각 2개), NAT 인스턴스, EIP
-│       ├── ec2/          # Control Plane, GPU Worker, CPU Worker, Jenkins, IAM, SG
+│       ├── ec2/          # Control Plane, Inference Worker, CPU Worker, Jenkins, IAM, SG
 │       ├── s3/           # 모델 가중치 저장 버킷 (버전 관리 활성화)
 │       ├── ecr/          # 컨테이너 이미지 레지스트리 (4개 리포지토리)
 │       ├── route53/      # microlens.cloud Hosted Zone
@@ -102,15 +100,15 @@ microlens-infra/
 │   └── playbooks/
 │       ├── 00-nat.yml                 # NAT ip_forward + iptables MASQUERADE
 │       ├── 01-common.yml              # containerd + kubelet/kubeadm/kubectl + ECR credential provider
-│       ├── 02-gpu.yml                 # NVIDIA Driver + Container Toolkit (gpu_workers만)
+│       ├── 02-gpu.yml                 # NVIDIA Driver + Container Toolkit (gpu_enabled: true 시에만)
 │       ├── 03-master.yml              # kubeadm init + Calico CNI + kubeconfig
-│       ├── 04-worker.yml              # kubeadm join (gpu_workers + cpu_workers)
-│       ├── 05-addons.yml              # Metrics Server + Nginx Ingress(NodePort 30080 고정)
-│       │                              # nvidia-device-plugin + GPU/CPU 노드 Taint/라벨
+│       ├── 04-worker.yml              # kubeadm join (cpu_workers)
+│       ├── 05-addons.yml              # Metrics Server + Nginx Ingress(NodePort 30080 고정) + 노드 라벨
 │       ├── 06-deploy-k8s.yml          # (Deprecated — ArgoCD가 대체)
 │       ├── 07-jenkins.yml             # Jenkins + Docker + AWS CLI + kubectl + kustomize 설치
 │       ├── 08-argocd.yml              # ArgoCD 설치 + microlens Application CRD 배포
-│       └── 09-upload-models.yml       # 모델 가중치 S3 업로드
+│       ├── 09-upload-models.yml       # 모델 가중치 S3 업로드
+│       └── 10-gpu-timeslicing.yml     # GPU Time-Slicing 설정 (gpu_enabled: true 환경 전용)
 │
 ├── k8s/
 │   ├── base/                          # 공통 리소스
@@ -125,9 +123,9 @@ microlens-infra/
 │   └── overlays/
 │       ├── phase1/                    # Phase 1 오버레이 (CPU만)
 │       │   └── kustomization.yaml
-│       └── phase2/                    # Phase 2 오버레이 (GPU 추가)
-│           ├── 01-stain-detection.yaml   # GPU Deployment + Service
-│           ├── 03-teeth.yaml             # GPU Deployment + Service
+│       └── phase2/                    # Phase 2 오버레이 (전체 서비스 + HA)
+│           ├── 01-stain-detection.yaml   # CPU Deployment × 2 + podAntiAffinity + Service
+│           ├── 03-teeth.yaml             # CPU Deployment × 2 + podAntiAffinity + Service
 │           ├── 05-hpa-gpu.yaml           # HPA — stain-detection, teeth
 │           └── kustomization.yaml        # 이미지 태그(commit SHA) 관리
 │
@@ -164,7 +162,7 @@ microlens-infra/
 | GitOps | ArgoCD |
 | CI/CD | Jenkins |
 | AI 모델 | YOLOv12 (ONNX, opset 17+) |
-| GPU 추론 | ONNX Runtime + CUDAExecutionProvider |
+| 추론 런타임 | ONNX Runtime (CPUExecutionProvider) |
 
 ---
 
@@ -176,34 +174,49 @@ microlens-infra/
 | Jenkins | t3.medium | 퍼블릭 | ECR PowerUser, S3 ReadOnly |
 | Control Plane | t3.medium | 프라이빗 | ECR ReadOnly, S3 ReadOnly |
 | CPU Worker × 1 | t3.large | 프라이빗 | ECR ReadOnly, S3 ReadOnly |
-| GPU Worker × 2 | g4dn.xlarge | 프라이빗 | ECR ReadOnly, S3 ReadOnly |
+| Inference Worker × 2 | t3.xlarge | 프라이빗 | ECR ReadOnly, S3 ReadOnly |
 
 ---
 
 ## 스케줄링 전략
 
 ```
-GPU Worker (g4dn.xlarge / T4 16GB) × 2
-  Taint:        dedicated=gpu:NoSchedule  ← Toleration 없는 Pod 진입 차단
-  Label:        node-type=gpu
-  배치 Pod:     stain-detection, teeth (YOLOv12 + Toleration + nodeSelector)
-  GPU 메모리:   YOLOv12 모델 ~800~1200 MiB / 15360 MiB (여유 충분)
+Inference Worker (t3.xlarge) × 2
+  Label:        node-type=cpu
+  HA 전략:      podAntiAffinity required (동일 노드에 같은 앱 2개 배치 금지)
+  배치 Pod:     stain-detection × 2, teeth × 2
+  장애 시:      노드 1대 다운 → 나머지 노드가 두 서비스 모두 흡수
 
 CPU Worker (t3.large) × 1
   Label:        node-type=cpu
-  배치 Pod:     stain-classification (nodeSelector: node-type=cpu)
-                microlens-client (nodeSelector: node-type=cpu)
-                ingress-nginx, metrics-server (Taint 없어 자연 배치)
+  배치 Pod:     stain-classification
+                microlens-client
+                ingress-nginx, metrics-server
 ```
 
-| 서비스 | 노드 타입 | GPU | nodeSelector | Toleration |
-|--------|-----------|-----|--------------|------------|
-| stain-detection | GPU Worker | ✅ 1개 | node-type=gpu | dedicated=gpu:NoSchedule |
-| stain-classification | CPU Worker | ❌ | node-type=cpu | 없음 |
-| teeth | GPU Worker | ✅ 1개 | node-type=gpu | dedicated=gpu:NoSchedule |
-| microlens-client | CPU Worker | ❌ | node-type=cpu | 없음 |
-| ingress-nginx | CPU Worker | ❌ | 없음 | 없음 |
-| metrics-server | CPU Worker | ❌ | 없음 | 없음 |
+| 서비스 | 노드 타입 | replicas | nodeSelector | podAntiAffinity |
+|--------|-----------|----------|--------------|-----------------|
+| stain-detection | Inference Worker | 2 | node-type=cpu | required |
+| stain-classification | CPU Worker | 1 | node-type=cpu | 없음 |
+| teeth | Inference Worker | 2 | node-type=cpu | required |
+| microlens-client | CPU Worker | 1 | node-type=cpu | 없음 |
+| ingress-nginx | CPU Worker | - | 없음 | 없음 |
+| metrics-server | CPU Worker | - | 없음 | 없음 |
+
+### GPU 전환 시 (gpu_enabled: true)
+
+GPU 추론이 필요한 경우 아래 값만 변경하면 됩니다.
+
+```
+# terraform/main.tf
+worker_instance_type = "g4dn.xlarge"
+
+# ansible/inventory/group_vars/all.yml
+gpu_enabled: true
+
+# ansible/inventory/hosts.ini
+[gpu_workers] 그룹으로 worker-1, worker-2 이동
+```
 
 ---
 
@@ -246,9 +259,9 @@ ALB → 워커 노드:30080 → Nginx Ingress Pod
 
 ## 배포 단계 (2-Phase 전략)
 
-### Phase 1 — t3.medium 검증 (g4dn 쿼타 대기 중)
+### Phase 1 — CPU 서비스만 배포
 
-네트워크, Ingress 라우팅, 파이프라인 연결만 검증합니다.
+네트워크, Ingress 라우팅, 파이프라인 연결을 검증합니다.
 
 ```bash
 # group_vars/all.yml: gpu_enabled: false
@@ -259,20 +272,19 @@ ansible-playbook site.yml
 # → stain-classification(CPU) + microlens-client 배포됨
 ```
 
-### Phase 2 — g4dn 전환 (쿼타 승인 후)
+### Phase 2 — 전체 서비스 배포 (HA)
 
 ```bash
-# 1. main.tf 수정
-#    worker_instance_type = "g4dn.xlarge"
+# 1. terraform/main.tf 확인
+#    worker_instance_type = "t3.xlarge"
 #    worker_count         = 2
-#    cpu_worker_count     = 1
 terraform apply
 
-# 2. group_vars/all.yml: gpu_enabled: true
-ansible-playbook ansible/site.yml --tags nat,gpu,addons
+# 2. hosts.ini IP 업데이트 후 Ansible 실행
+ansible-playbook ansible/site.yml
 
-# 3. ArgoCD Application CRD를 phase2 오버레이로 업데이트
-#    → stain-detection, teeth(GPU) 포함 전체 서비스 자동 배포
+# 3. ArgoCD Application을 phase2 오버레이로 업데이트
+#    → stain-detection × 2, teeth × 2 (podAntiAffinity HA) 포함 전체 배포
 ansible-playbook ansible/playbooks/08-argocd.yml -e argocd_overlay=phase2
 ```
 
@@ -301,6 +313,8 @@ GitHub Push (microlens-ai-api 또는 microlens-client)
 ### Terraform 실행
 
 ```bash
+cd terraform
+
 # 1. 초기화 (backend.tf의 terraform 블록 주석 처리 상태에서 시작)
 terraform init
 
@@ -341,11 +355,11 @@ ansible-playbook site.yml --tags nat      # NAT ip_forward + iptables
 ansible-playbook site.yml --tags common   # containerd + kubeadm 설치
 ansible-playbook site.yml --tags master   # kubeadm init + Calico
 ansible-playbook site.yml --tags worker   # kubeadm join
-ansible-playbook site.yml --tags addons   # Ingress(NodePort 30080) + Metrics Server + 노드 라벨/Taint
+ansible-playbook site.yml --tags addons   # Ingress(NodePort 30080) + Metrics Server + 노드 라벨
 ansible-playbook playbooks/07-jenkins.yml # Jenkins 설치
 ansible-playbook playbooks/08-argocd.yml  # ArgoCD 설치 + Application 배포
 
-# CPU Worker 신규 추가 시
+# 워커 노드 신규 추가 시
 ansible-playbook site.yml --tags common,worker --limit bastion,cpu_workers
 ansible-playbook site.yml --tags addons
 ```
@@ -368,12 +382,8 @@ kubectl은 Control Plane 한 곳에서 모든 노드/Pod 상태를 조회할 수
 # 노드 목록 + 역할/상태
 kubectl get nodes -o wide
 
-# 노드별 라벨 확인 (node-type=gpu/cpu)
+# 노드별 라벨 확인 (node-type=cpu)
 kubectl get nodes --show-labels
-
-# 노드별 Taint 확인
-kubectl get nodes -o custom-columns=\
-'NAME:.metadata.name,TAINTS:.spec.taints'
 
 # 노드별 CPU/메모리 실시간 사용량 (Metrics Server 필요)
 kubectl top nodes
@@ -406,10 +416,6 @@ kubectl describe nodes | grep -A 20 "Allocated resources"
 
 # 특정 Pod 상세 (스케줄링 이유, 이벤트 포함)
 kubectl describe pod -n microlens <pod-name>
-
-# GPU 할당 현황 (nvidia.com/gpu 기준)
-kubectl get nodes -o json | \
-  jq '.items[] | {name: .metadata.name, gpu_allocatable: .status.allocatable["nvidia.com/gpu"], gpu_capacity: .status.capacity["nvidia.com/gpu"]}'
 
 # HPA 상태 (현재 replica 수, CPU 사용률)
 kubectl get hpa -n microlens
@@ -466,15 +472,16 @@ readinessProbe:
   httpGet:
     path: /health
     port: 8000
-  initialDelaySeconds: 30
+  initialDelaySeconds: 90
   periodSeconds: 10
-  failureThreshold: 6
+  failureThreshold: 3
 livenessProbe:
   httpGet:
     path: /health
     port: 8000
-  initialDelaySeconds: 60
-  periodSeconds: 30
+  initialDelaySeconds: 120
+  periodSeconds: 15
+  failureThreshold: 3
 ```
 
 ---

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /home/jina/project/microlens/microlens-infra/terraform/*.tf /home/jina/project/microlens/microlens-infra/terraform/terraform.tfstate)"
+    ]
+  }
+}

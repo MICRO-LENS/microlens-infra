@@ -26,7 +26,7 @@ module "alb" {
   zone_id         = module.route53.zone_id
   domain          = "microlens.cloud"
 
-  # GPU 워커 + CPU 워커 전체를 Target Group에 등록
+  # inference 워커(t3.xlarge) + CPU 워커 전체를 Target Group에 등록
   worker_instance_ids = concat(
     module.ec2.worker_instance_ids,
     module.ec2.cpu_worker_instance_ids,
@@ -78,7 +78,7 @@ module "ec2" {
   # jenkins_port                  = 8080
   # jenkins_webhook_allowed_cidrs = ["140.82.112.0/20", "185.199.108.0/22"]
 
-  worker_instance_type = "g4dn.xlarge"
+  worker_instance_type = "t3.xlarge"
   worker_count         = 2
   cpu_worker_count     = 1
 }

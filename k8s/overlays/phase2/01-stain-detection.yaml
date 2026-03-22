@@ -6,7 +6,7 @@ metadata:
   labels:
     app: stain-detection
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: stain-detection
@@ -60,11 +60,9 @@ spec:
             requests:
               cpu: "500m"
               memory: "2Gi"
-              nvidia.com/gpu: "1"
             limits:
               cpu: "2"
               memory: "8Gi"
-              nvidia.com/gpu: "1"
           livenessProbe:
             httpGet:
               path: /health
@@ -82,13 +80,18 @@ spec:
       volumes:
         - name: model-volume
           emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - stain-detection
+              topologyKey: kubernetes.io/hostname
       nodeSelector:
-        node-type: gpu
-      tolerations:
-        - key: dedicated
-          operator: Equal
-          value: gpu
-          effect: NoSchedule
+        node-type: cpu
 ---
 apiVersion: v1
 kind: Service

@@ -10,7 +10,8 @@
 #   ansible-playbook site.yml --tags addons
 #   ansible-playbook site.yml --tags k8s-deploy  # [DEPRECATED] ArgoCD로 대체됨
 #   ansible-playbook site.yml --tags jenkins      # Jenkins CI 서버 설치
-#   ansible-playbook site.yml --tags argocd       # ArgoCD 설치 + microlens Application 등록
+#   ansible-playbook site.yml --tags argocd         # ArgoCD 설치 + microlens Application 등록
+#   ansible-playbook site.yml --tags gpu-timeslicing # GPU Time-Slicing 활성화 (물리 GPU 1개 → 슬롯 2개)
 #
 # K8s 매니페스트만 재배포:
 #   ansible-playbook site.yml --tags k8s-deploy
@@ -41,3 +42,4 @@
 - import_playbook: playbooks/06-deploy-k8s.yml
 - import_playbook: playbooks/07-jenkins.yml
 - import_playbook: playbooks/08-argocd.yml
+- import_playbook: playbooks/10-gpu-timeslicing.yml
