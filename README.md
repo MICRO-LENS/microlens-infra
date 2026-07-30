@@ -1,7 +1,86 @@
-# microlens-infra
+<div align="center">
 
-MicroLens 프로젝트의 인프라스트럭처 전용 저장소입니다.
-Terraform으로 AWS 리소스를 프로비저닝하고, Ansible로 서버를 구성하며, Kustomize + ArgoCD로 Kubernetes 서비스를 배포합니다.
+# 🏗️ MicroLens Infra
+
+### 일상 속 미세한 부분까지, 대신 확인해주는 시력보조 파트너 — 인프라스트럭처
+
+**Terraform으로 AWS를 프로비저닝하고, Ansible로 서버를 구성하며, Kustomize + ArgoCD로 Kubernetes 서비스를 GitOps 배포합니다.**
+
+![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat&logo=amazonwebservices&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-844FBA?style=flat&logo=terraform&logoColor=white)
+![Ansible](https://img.shields.io/badge/Ansible-EE0000?style=flat&logo=ansible&logoColor=white)
+![Kubernetes](https://img.shields.io/badge/Kubernetes%20(kubeadm)-326CE5?style=flat&logo=kubernetes&logoColor=white)
+![ArgoCD](https://img.shields.io/badge/ArgoCD-EF7B4D?style=flat&logo=argo&logoColor=white)
+![Jenkins](https://img.shields.io/badge/Jenkins-D24939?style=flat&logo=jenkins&logoColor=white)
+
+🌐 **서비스**: [microlens.cloud](https://microlens.cloud/) · 📹 **시연 영상**: [YouTube](https://youtu.be/7jnekg9lZeo)
+
+[![MicroLens 시연 영상](https://img.youtube.com/vi/7jnekg9lZeo/0.jpg)](https://youtu.be/7jnekg9lZeo)
+
+</div>
+
+---
+
+## 📌 프로젝트 소개
+
+MicroLens는 **2023 배리어프리 앱 개발 콘테스트 우수상**을 수상한 시각장애인용 옷 얼룩 탐지 앱 [Stainless](https://github.com/catapillar0505/Stainless)를 서버 기반 웹 서비스로 발전시킨 **1인 프로젝트**입니다. 이 저장소는 그 서비스를 받치는 전체 인프라를 코드로 관리합니다.
+
+- **IaC 전 구간 자동화**: EKS 같은 관리형 서비스 대신 **kubeadm으로 클러스터를 직접 구축** — VPC 설계부터 CNI, Ingress, GitOps까지 전 레이어를 직접 다뤘습니다
+- **GitOps 운영**: Jenkins가 이미지를 빌드하고 이 저장소의 Kustomize 태그를 갱신하면, ArgoCD가 감지해 자동 배포합니다
+- **관측 기반 비용 최적화**: GPU 사용률 2.5%를 직접 측정하고 GPU → CPU 아키텍처로 전환, 절감 비용으로 HA를 확보했습니다 (아래 트러블슈팅 참고)
+
+![MicroLens 시연 — 얼룩 탐지](docs/images/demo-stain-detection.png)
+
+---
+
+## 🔎 트러블슈팅 — GPU 사용률 2.5%를 발견하고 아키텍처를 뒤집다
+
+> 이 프로젝트에서 가장 의미 있었던 의사결정입니다. "GPU가 있으면 좋다"가 아니라, **관측 데이터로 아키텍처를 결정**했습니다.
+
+### 초기 상황
+
+- T4 GPU(g4dn.xlarge)로 학습시킨 YOLOv8 얼룩 분류 모델, YOLOv12 얼룩 탐지 모델을 서빙
+- K8s `nvidia.com/gpu: 1` 설정으로 GPU 워커 노드당 GPU Pod 1개만 스케줄링되도록 배포
+
+### 운영 중 문제 발견
+
+- `nvidia-smi`로 추론 API 요청 시 GPU VRAM 점유량 관찰 → 두 노드 모두 **385 MiB / 15,360 MiB = 2.5%**만 사용
+- 0.1초 간격 `nvidia-smi` 모니터링으로 요청 시 GPU-util 변화 관찰 → **8% → 11%** 소폭 변화에 그침
+
+### 판단
+
+- 단일 탐지 모델 + ONNX 경량화 조합은 GPU 자원을 크게 활용하지 않음
+- NVIDIA 드라이버 스택 관리 부담 + g4dn.xlarge 인스턴스 비용을 지불하기엔 모델이 너무 가볍고, 명백한 비용 낭비
+
+### 개선
+
+| 항목 | 변경 전 | 변경 후 |
+|------|---------|---------|
+| 인스턴스 | g4dn.xlarge (GPU) | **t3.xlarge (CPU)** — 비용 다운그레이드 |
+| 스케줄링 | GPU taints / tolerations | 전략 삭제 → **HA 중심 재설계** |
+| 가용성 | GPU 노드당 Pod 1개 | **replicas 2 + podAntiAffinity(required)** |
+
+```
+podAntiAffinity: labelSelector app=stain-detection 인 Pod와 같은 노드 배치 금지
+  → 노드1: stain-detection-1 + teeth-1
+  → 노드2: stain-detection-2 + teeth-2
+  → 노드 1대 장애 시 나머지 노드가 두 서비스 모두 흡수
+```
+
+### 결과
+
+**비용을 절감하면서 가용성은 오히려 높아진 서버.** GPU가 다시 필요해질 때를 대비해 `gpu_enabled` 플래그 하나로 GPU 아키텍처로 복귀할 수 있도록 Ansible 플레이북(NVIDIA Driver, GPU Time-Slicing)은 유지했습니다.
+
+---
+
+## 🛠️ 운영 기록 (커밋 이력에서)
+
+- **GitOps 전환**: Jinja2 수동 배포 → **Kustomize 매니페스트 구조 전환 + ArgoCD 도입**, 배포 이력이 전부 git 커밋(`ci: update image tags to <sha>`)으로 남는 구조
+- **모델 배포 자동화**: 모델 가중치를 S3에 업로드하는 플레이북 + **init container가 S3에서 모델을 다운로드**해 Pod에 마운트 — 이미지에 모델을 굽지 않아 이미지 크기·보안 부담 감소
+- **CI 인증 자동화**: Jenkins에 GitHub deploy key 등록을 Ansible로 자동화, Vault로 시크릿 암호화
+- **스케줄링 데드락 방지**: 롤링 업데이트 시 리소스 부족으로 새 Pod가 스케줄링되지 못하는 문제를 `maxSurge` 설정으로 해결
+- **NAT 인스턴스 직접 구축**: NAT Gateway 대신 t3.nano NAT 인스턴스로 비용 절감 — `ip_forward`/`iptables MASQUERADE` 인터페이스명 이슈, 설정 덮어쓰기 오류를 직접 디버깅
+- **kubelet ECR credential provider**: 프라이빗 노드가 ECR 이미지를 당겨오도록 credential provider 구성 (다운로드 링크 유실 이슈 해결 포함)
 
 ---
 
@@ -488,5 +567,6 @@ livenessProbe:
 
 ## 관련 저장소
 
-- [microlens-ai-api](../microlens-ai-api) — FastAPI 백엔드 서버
-- [microlens-client](../microlens-client) — React + Vite 웹 클라이언트
+- 🔬 [microlens-ai-api](https://github.com/MICRO-LENS/microlens-ai-api) — FastAPI AI 추론 서버 (YOLOv12 · ONNX Runtime)
+- 💻 [microlens-client](https://github.com/MICRO-LENS/microlens-client) — React + Vite 웹 클라이언트
+- 👕 [Stainless](https://github.com/catapillar0505/Stainless) — 전신 프로젝트 (2023 배리어프리 앱 개발 콘테스트 우수상)
