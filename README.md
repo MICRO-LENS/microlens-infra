@@ -13,7 +13,7 @@
 ![ArgoCD](https://img.shields.io/badge/ArgoCD-EF7B4D?style=flat&logo=argo&logoColor=white)
 ![Jenkins](https://img.shields.io/badge/Jenkins-D24939?style=flat&logo=jenkins&logoColor=white)
 
-🌐 **서비스**: [microlens.cloud](https://microlens.cloud/) · 📹 **시연 영상**: [YouTube](https://youtu.be/7jnekg9lZeo)
+📹 **시연 영상**: [YouTube](https://youtu.be/7jnekg9lZeo)
 
 [![MicroLens 시연 영상](https://img.youtube.com/vi/7jnekg9lZeo/0.jpg)](https://youtu.be/7jnekg9lZeo)
 
